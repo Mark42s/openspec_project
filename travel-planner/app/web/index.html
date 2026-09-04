@@ -201,15 +201,17 @@ function renderPoiMap(pois) {
   const minLat = Math.min(...lats), maxLat = Math.max(...lats);
   const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
   const pad = 40;
-  const xScale = (lng) => pad + (lng - minLng) / (maxLng - minLng || 1) * (map.clientWidth - pad*2);
-  const yScale = (lat) => pad + (maxLat - lat) / (maxLat - minLat || 1) * (map.clientHeight - pad*2);
+  // 使用固定尺寸避免 clientWidth=0 问题
+  const W = map.clientWidth || 900, H = map.clientHeight || 280;
+  const xScale = (lng) => pad + (lng - minLng) / (maxLng - minLng || 1) * (W - pad*2);
+  const yScale = (lat) => pad + (maxLat - lat) / (maxLat - minLat || 1) * (H - pad*2);
 
-  let svg = `<svg viewBox="0 0 ${map.clientWidth} ${map.clientHeight}" xmlns="http://www.w3.org/2000/svg">`;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">`;
   for (let i = 0; i <= 4; i++) {
-    const y = pad + i * (map.clientHeight - pad*2) / 4;
-    const x = pad + i * (map.clientWidth - pad*2) / 4;
-    svg += `<line x1="${pad}" y1="${y}" x2="${map.clientWidth-pad}" y2="${y}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="3,3"/>`;
-    svg += `<line x1="${x}" y1="${pad}" x2="${x}" y2="${map.clientHeight-pad}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="3,3"/>`;
+    const y = pad + i * (H - pad*2) / 4;
+    const x = pad + i * (W - pad*2) / 4;
+    svg += `<line x1="${pad}" y1="${y}" x2="${W-pad}" y2="${y}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="3,3"/>`;
+    svg += `<line x1="${x}" y1="${pad}" x2="${x}" y2="${H-pad}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="3,3"/>`;
   }
   const colors = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22','#34495e'];
   withCoords.forEach((p, i) => {
