@@ -5,29 +5,97 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>旅行规划 Demo</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    --bg: #fafaf8; --card: #fff; --border: #ddd; --text: #222; --muted: #777;
+    --accent: #4a90d9; --tag-ok-bg: #e7f6e7; --tag-ok: #0a5;
+    --tag-warn-bg: #fdf3e0; --tag-warn: #a60; --day-bg: rgba(120,120,120,.06);
+    --img-placeholder: #eee; --link: #1a73e8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #1a1a2e; --card: #22223b; --border: #444; --text: #e0e0e0; --muted: #999;
+      --accent: #6cb4ee; --tag-ok-bg: #1a3a2a; --tag-ok: #5d5;
+      --tag-warn-bg: #3a2a10; --tag-warn: #da3; --day-bg: rgba(200,200,200,.08);
+      --img-placeholder: #333; --link: #82b1ff;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #1a1a2e; --card: #22223b; --border: #444; --text: #e0e0e0; --muted: #999;
+    --accent: #6cb4ee; --tag-ok-bg: #1a3a2a; --tag-ok: #5d5;
+    --tag-warn-bg: #3a2a10; --tag-warn: #da3; --day-bg: rgba(200,200,200,.08);
+    --img-placeholder: #333; --link: #82b1ff;
+  }
   body { font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-         max-width: 900px; margin: 0 auto; padding: 16px; line-height: 1.6; }
-  h1 { font-size: 1.3rem; } .muted { color: #777; font-size: .85rem; }
-  textarea { width: 100%; min-height: 64px; box-sizing: border-box; }
-  button { padding: 8px 18px; cursor: pointer; }
-  .banner { background: #fff4e5; border: 1px solid #ecc; border-radius: 8px; padding: 8px 12px;
-            font-size: .85rem; }
-  .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; margin: 10px 0; }
-  .day { background: rgba(120,120,120,.06); }
-  table { border-collapse: collapse; width: 100%; }
-  td, th { border: 1px solid #ddd; padding: 6px 10px; font-size: .9rem; }
+         max-width: 960px; margin: 0 auto; padding: 16px; line-height: 1.6;
+         background: var(--bg); color: var(--text); }
+  h1 { font-size: 1.3rem; margin: 0 0 8px; }
+  .muted { color: var(--muted); font-size: .85rem; }
+  textarea { width: 100%; min-height: 64px; box-sizing: border-box;
+             background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+  button { padding: 8px 18px; cursor: pointer; border: 1px solid var(--border);
+           border-radius: 6px; background: var(--card); color: var(--text); }
+  button:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .banner { background: var(--tag-warn-bg); border: 1px solid #ecc; border-radius: 8px;
+            padding: 8px 12px; font-size: .85rem; color: var(--text); }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px;
+          margin: 10px 0; background: var(--card); }
+  .day { background: var(--day-bg); }
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+  td, th { border: 1px solid var(--border); padding: 6px 10px; vertical-align: middle; }
+  th { background: var(--day-bg); }
   .tag { display:inline-block; border-radius: 999px; padding: 0 8px; font-size: .78rem;
-         background:#eef; }
-  .tag.ok { background: #e7f6e7; color:#0a5; } .tag.warn { background:#fdf3e0; color:#a60; }
+         background:var(--tag-ok-bg); color:var(--tag-ok); }
+  .tag.warn { background:var(--tag-warn-bg); color:var(--tag-warn); }
   .err { color:#c00; white-space: pre-wrap; }
   ul { margin: 4px 0 4px 18px; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* POI image thumbnail */
+  .poi-thumb { width: 64px; height: 48px; object-fit: cover; border-radius: 4px;
+              background: var(--img-placeholder); display: block; margin: 0 auto; }
+  .poi-thumb-placeholder { width: 64px; height: 48px; border-radius: 4px;
+                           background: var(--img-placeholder); display: flex; align-items: center;
+                           justify-content: center; font-size: 1.2rem; color: var(--muted); margin: 0 auto; }
+
+  /* Map container */
+  #map-wrap { margin: 10px 0; }
+  #poi-map { width: 100%; height: 280px; border: 1px solid var(--border); border-radius: 8px;
+             background: var(--day-bg); position: relative; overflow: hidden; }
+  #poi-map svg { width: 100%; height: 100%; }
+  .map-dot { cursor: pointer; transition: r .15s; }
+  .map-dot:hover { r: 8; }
+  .map-label { font-size: 11px; pointer-events: none; fill: var(--text); }
+  .map-tooltip { position: absolute; background: var(--card); border: 1px solid var(--border);
+                 border-radius: 6px; padding: 6px 10px; font-size: .8rem; pointer-events: none;
+                 z-index: 10; max-width: 200px; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+  .map-hide { text-align: center; padding: 60px 16px; color: var(--muted); }
+
+  /* Activity inline POI */
+  .activity-poi { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle;
+                  background: var(--day-bg); border-radius: 6px; padding: 2px 6px; margin: 2px 0; }
+  .activity-poi .mini-thumb { width: 32px; height: 24px; object-fit: cover; border-radius: 3px;
+                               background: var(--img-placeholder); }
+
+  /* Scrollable POI table container */
+  .table-scroll { overflow-x: auto; }
+
+  /* Loading spinner */
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border);
+             border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Image lightbox */
+  #lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: none;
+              align-items: center; justify-content: center; z-index: 1000; cursor: pointer; }
+  #lightbox.show { display: flex; }
+  #lightbox img { max-width: 90vw; max-height: 90vh; border-radius: 8px; }
 </style>
 </head>
 <body>
-  <h1>🧳 旅行规划 Demo</h1>
-  <div class="banner">数据说明:景点来自高德/腾讯/百度多平台交叉(≥2 平台命中标「多平台确认」);未配置密钥时使用内置演示景点(mock)。
-  交通/住宿为演示数据。价格均以实际平台为准。</div>
+  <h1>旅行规划 Demo</h1>
+  <div class="banner">景点来自高德/腾讯/百度多平台交叉(≥2 平台命中标「多平台确认」);未配置密钥时使用内置演示景点(mock)。
+  交通/住宿为演示数据。价格均以实际平台为准。点击图片可放大查看。</div>
 
   <details id="cfg" style="margin:10px 0">
     <summary>⚙️ 模型配置(用于语义理解 / 逐日规划 / 实时搜索;不配则用内置演示模式)</summary>
@@ -62,11 +130,20 @@
   <div id="out" hidden>
     <div class="card" id="summary"></div>
     <div class="card" id="days"></div>
+    <div class="card" id="map-wrap">
+      <b>景点分布地图</b>
+      <div id="poi-map"></div>
+    </div>
     <div class="card" id="pois"></div>
     <div class="card" id="cost"></div>
     <div class="card" id="reco"></div>
   </div>
   <div id="err" class="err" hidden></div>
+
+  <!-- Image lightbox -->
+  <div id="lightbox" onclick="this.classList.remove('show')">
+    <img id="lightbox-img" src="" alt="" />
+  </div>
 
 <script>
 const $ = (s) => document.querySelector(s);
@@ -87,7 +164,97 @@ $('#go').onclick = async () => {
   render(data);
 };
 
+/* ---- POI -> map lookup for activity enrichment ---- */
+let _poiMap = {};
+function buildPoiMap(pois) {
+  _poiMap = {};
+  (pois||[]).forEach(p => { _poiMap[p.name] = p; });
+}
+function findPoiInText(text) {
+  for (const [name, poi] of Object.entries(_poiMap)) {
+    if (text.includes(name)) return poi;
+  }
+  return null;
+}
+
+/* ---- Image helpers ---- */
+function thumbHtml(url, name, size) {
+  const w = size || 64, h = size ? Math.round(size*0.75) : 48;
+  if (!url) return `<div class="poi-thumb-placeholder" style="width:${w}px;height:${h}px" title="暂无图片">📷</div>`;
+  return `<img class="poi-thumb" style="width:${w}px;height:${h}px" src="${escapeHtml(url)}" alt="${escapeHtml(name)}" onclick="showLightbox(this.src)" onerror="this.outerHTML='<div class=\\'poi-thumb-placeholder\\' style=\\'width:${w}px;height:${h}px\\'>📷</div>'" />`;
+}
+function showLightbox(src) {
+  $('#lightbox-img').src = src;
+  $('#lightbox').classList.add('show');
+}
+
+/* ---- POI Map (SVG scatter using lng/lat) ---- */
+function renderPoiMap(pois) {
+  const map = $('#poi-map');
+  const withCoords = (pois||[]).filter(p => p.lng != null && p.lat != null);
+  if (withCoords.length < 2) {
+    map.innerHTML = `<div class="map-hide">📍 景点坐标数据不足，无法绘制分布图（至少需 2 个有经纬线的景点）</div>`;
+    return;
+  }
+  const lats = withCoords.map(p => p.lat);
+  const lngs = withCoords.map(p => p.lng);
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
+  const pad = 40;
+  const xScale = (lng) => pad + (lng - minLng) / (maxLng - minLng || 1) * (map.clientWidth - pad*2);
+  const yScale = (lat) => pad + (maxLat - lat) / (maxLat - minLat || 1) * (map.clientHeight - pad*2);
+
+  let svg = `<svg viewBox="0 0 ${map.clientWidth} ${map.clientHeight}" xmlns="http://www.w3.org/2000/svg">`;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad + i * (map.clientHeight - pad*2) / 4;
+    const x = pad + i * (map.clientWidth - pad*2) / 4;
+    svg += `<line x1="${pad}" y1="${y}" x2="${map.clientWidth-pad}" y2="${y}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="3,3"/>`;
+    svg += `<line x1="${x}" y1="${pad}" x2="${x}" y2="${map.clientHeight-pad}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="3,3"/>`;
+  }
+  const colors = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22','#34495e'];
+  withCoords.forEach((p, i) => {
+    const cx = xScale(p.lng), cy = yScale(p.lat);
+    const color = colors[i % colors.length];
+    const shortName = p.name.length > 8 ? p.name.slice(0,8) + '…' : p.name;
+    svg += `<circle class="map-dot" cx="${cx}" cy="${cy}" r="5" fill="${color}" data-name="${escapeHtml(p.name)}" data-price="${p.ticket_price ?? '—'}" data-url="${p.url || ''}" />`;
+    svg += `<text class="map-label" x="${cx}" y="${cy-10}" text-anchor="middle">${escapeHtml(shortName)}</text>`;
+  });
+  svg += '</svg>';
+  map.innerHTML = svg;
+
+  const tooltip = document.createElement('div');
+  tooltip.className = 'map-tooltip';
+  tooltip.style.display = 'none';
+  map.appendChild(tooltip);
+
+  map.querySelectorAll('.map-dot').forEach(dot => {
+    dot.addEventListener('mouseenter', (e) => {
+      const name = dot.dataset.name;
+      const price = dot.dataset.price;
+      const url = dot.dataset.url;
+      tooltip.innerHTML = `<b>${name}</b><br>门票: ${price}元${url ? `<br><a href="${url}" target="_blank">查看地图 ↗</a>` : ''}`;
+      tooltip.style.display = 'block';
+      const rect = map.getBoundingClientRect();
+      tooltip.style.left = (e.clientX - rect.left + 10) + 'px';
+      tooltip.style.top = (e.clientY - rect.top - 10) + 'px';
+    });
+    dot.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+    dot.addEventListener('click', () => {
+      const url = dot.dataset.url;
+      if (url) window.open(url, '_blank');
+    });
+  });
+}
+
+/* ---- Map link helper for POI table ---- */
+function mapLinkHtml(url) {
+  if (!url) return '<span class="muted">—</span>';
+  return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">查看地图 ↗</a>`;
+}
+
 function render(d) {
+  buildPoiMap(d.pois);
+
   const flags = [
     d.web_research_used ? '<span class="tag ok">已用实时网页资讯</span>' : '',
     d.is_mock ? '<span class="tag warn">mock 演示数据</span>' : '<span class="tag ok">真实数据</span>',
@@ -97,28 +264,49 @@ function render(d) {
     `<b>${escapeHtml(d.request_summary)}</b> ${flags}<br><div class="muted">来源:${d.sources.join('、')}</div>`
     + `<div style="margin-top:6px">${escapeHtml(d.note)}</div>`;
 
-  const daysHtml = (d.days||[]).map(x =>
-    `<div class="card day"><b>Day ${x.day} · ${escapeHtml(x.title)}</b>`
-    + `<ul>${x.activities.map(a=>`<li>${escapeHtml(a)}</li>`).join('')}</ul>`
-    + (x.lodging_note?`<div class="muted">${escapeHtml(x.lodging_note)}</div>`:'') + `</div>`).join('');
+  /* ---- Days with enriched POI images/links ---- */
+  const daysHtml = (d.days||[]).map(x => {
+    const acts = (x.activities||[]).map(a => {
+      const poi = findPoiInText(a);
+      if (!poi) return `<li>${escapeHtml(a)}</li>`;
+      const thumb = thumbHtml(poi.image_url, poi.name, 32);
+      const link = poi.url ? ` <a href="${escapeHtml(poi.url)}" target="_blank" rel="noopener" style="font-size:.8rem">[地图]</a>` : '';
+      return `<li><span class="activity-poi">${thumb} ${escapeHtml(a)}${link}</span></li>`;
+    }).join('');
+    return `<div class="card day"><b>Day ${x.day} · ${escapeHtml(x.title)}</b>`
+    + `<ul>${acts}</ul>`
+    + (x.lodging_note?`<div class="muted">${escapeHtml(x.lodging_note)}</div>`:'') + `</div>`;
+  }).join('');
   $('#days').innerHTML = `<b>逐日行程</b>` + (daysHtml || '<div class="muted">无</div>');
 
-  const poiRows = (d.pois||[]).map(p =>
-    `<tr><td>${escapeHtml(p.name)}${p.verified?'<span class="tag ok">多平台确认</span>':'<span class="tag warn">单平台</span>'}`
-    + `<div class="muted">${escapeHtml(p.address||'')}</div></td>`
-    + `<td>${escapeHtml(p.sources.join('、'))}</td>`
-    + `<td>${escapeHtml(p.category||'-')}</td>`
-    + `<td>${p.ticket_price==null?'以现场为准':p.ticket_price+' 元'}</td>`
-    + `<td>${escapeHtml(p.open_hours||'以官方为准')}</td></tr>`).join('');
-  $('#pois').innerHTML = `<b>候选景点(${(d.pois||[]).length})</b>`
-    + `<table><tr><th>名称</th><th>来源</th><th>类别</th><th>门票</th><th>开放</th></tr>${poiRows||'<tr><td colspan=5>无</td></tr>'}</table>`;
+  /* ---- POI Map ---- */
+  renderPoiMap(d.pois);
 
+  /* ---- POI table with images and links ---- */
+  const poiRows = (d.pois||[]).map(p =>
+    `<tr>
+      <td style="text-align:center">${thumbHtml(p.image_url, p.name)}</td>
+      <td>${escapeHtml(p.name)}${p.verified?'<span class="tag ok">多平台确认</span>':'<span class="tag warn">单平台</span>'}
+        ${p.description?`<div class="muted" title="${escapeHtml(p.description)}">ℹ️</div>`:''}
+        <div class="muted">${escapeHtml(p.address||'')}</div></td>
+      <td>${escapeHtml(p.sources.join('、'))}</td>
+      <td>${escapeHtml(p.category||'-')}</td>
+      <td>${p.ticket_price==null?'以现场为准':p.ticket_price+' 元'}</td>
+      <td>${escapeHtml(p.open_hours||'以官方为准')}</td>
+      <td style="text-align:center">${mapLinkHtml(p.url)}</td>
+    </tr>`).join('');
+  $('#pois').innerHTML =
+    `<b>候选景点(${(d.pois||[]).length})</b>`
+    + `<div class="table-scroll"><table><tr><th>图片</th><th>名称</th><th>来源</th><th>类别</th><th>门票</th><th>开放</th><th>详情</th></tr>${poiRows||'<tr><td colspan=7>无</td></tr>'}</table></div>`;
+
+  /* ---- Cost ---- */
   const c = d.cost_breakdown||{};
   $('#cost').innerHTML = `<b>费用估算</b><table><tr><th>往返交通</th><th>住宿</th><th>门票</th>`
     + `<th>餐饮</th><th>合计</th><th>人均</th></tr>`
     + `<tr><td>${c.transport||0}</td><td>${c.hotels||0}</td><td>${c.tickets||0}</td>`
     + `<td>${c.meals||0}</td><td><b>${c.total||0}</b></td><td><b>${c.per_person||0}</b></td></tr></table>`;
 
+  /* ---- Recommendations ---- */
   const recHtml = (d.recommendations||[]).map(r=>
     `<div>· <b>${escapeHtml(r.label)}</b> — ${r.price} 元 <span class="muted">(${escapeHtml(r.reason)})</span></div>`).join('');
   $('#reco').innerHTML = `<b>推荐</b>` + (recHtml||'<div class="muted">无</div>');

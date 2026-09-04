@@ -145,6 +145,20 @@ class TestItinerary:
         assert res
         assert all(p.is_mock for p in res)
         assert res[0].ticket_price is not None
+        # 新能力:mock 景点也有地图链接
+        assert all(p.url is not None for p in res)
+        assert "uri.amap.com" in res[0].url
+
+    def test_poi_url_image_propagated_in_plan(self):
+        """验证 POI 的 url/image_url 字段在规划响应中正确传递。"""
+        resp = client.post(
+            "/api/plan", json={"text": "上海出发带老人去西安5天人均3000偏人文"}
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        for p in body["pois"]:
+            assert "url" in p, "POI 应包含 url 字段"
+            assert "image_url" in p, "POI 应包含 image_url 字段"
 
     def test_cost_is_deterministic(self):
         request = _sample_request()

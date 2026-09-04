@@ -232,7 +232,7 @@ def build_plan(
 
 
 def gather_live_info(pois: list[Poi], enabled: bool | None = None) -> str:
-    """可选:用 Claude 网页搜索补最新开放时间/票价/攻略(有界 ≤3 次检索)。
+    """可选:用 Claude 网页搜索补最新开放时间/票价/攻略/官网链接(有界 ≤3 次检索)。
 
     enabled 覆盖环境变量(缺省读 WEB_RESEARCH_ENABLED)。返回压缩文本段;
     未启用/无 key/无景点时返回空串(调用方据此设 web_research_used=False)。
@@ -243,7 +243,8 @@ def gather_live_info(pois: list[Poi], enabled: bool | None = None) -> str:
     names = "\n".join(f"- {p.name}: {p.description or '游览'}" for p in pois[:6])
     prompt = (
         "请对下列中文景点检索实时开放时间与门票价格等最新信息(近期公告/预约要求),"
-        "汇总成简短中文要点;信息不确定请注明「以官方为准」。请勿编造。\n" + names
+        "汇总成简短中文要点;同时请附上每个景点的官网/百科链接(如有)。"
+        "信息不确定请注明「以官方为准」。请勿编造。\n" + names
     )
     tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
     client = _client()
@@ -265,10 +266,12 @@ def gather_live_info(pois: list[Poi], enabled: bool | None = None) -> str:
 def _poi_line(p: Poi) -> str:
     tag = "多平台已确认" if p.verified else "单平台"
     ticket = f"门票约{p.ticket_price:.0f}元" if p.ticket_price is not None else "门票以现场为准"
+    link = f"详情:{p.url}" if p.url else ""
+    img = f"封面图:{p.image_url}" if p.image_url else ""
     return (
         f"- {p.name}({p.category}) {p.address} {ticket} "
         f"开放{p.open_hours or '?'} 来源{'、'.join(p.sources) or '?'} {tag} "
-        f"{p.description or ''}"
+        f"{p.description or ''}{' '+link if link else ''}{' '+img if img else ''}"
     )
 
 

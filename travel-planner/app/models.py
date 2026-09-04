@@ -90,6 +90,9 @@ class Poi(BaseModel):
     open_hours: str | None = None
     description: str = ""
     is_mock: bool = False
+    url: str | None = Field(default=None, description="地图详情页链接(高德/百度)")
+    image_url: str | None = Field(default=None, description="首张封面图 URL")
+    website: str | None = Field(default=None, description="景点官网或百科链接")
 
 
 class ItineraryDay(BaseModel):

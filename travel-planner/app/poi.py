@@ -75,6 +75,12 @@ class AmapProvider(PoiProvider):
         for it in (data.get("pois") or [])[:_TOP_K]:
             loc = it.get("location") or ""
             lng, lat = (loc.split(",") + [None, None])[:2]
+            # 提取首张封面图
+            photos = it.get("photos") or []
+            first_photo = (photos[0].get("url", "") if photos else "") or None
+            # 构造高德 POI 详情页 URL
+            poi_id = it.get("id", "")
+            amap_url = f"https://uri.amap.com/poi/{poi_id}" if poi_id else None
             pois.append(
                 Poi(
                     name=it.get("name", ""),
@@ -82,6 +88,8 @@ class AmapProvider(PoiProvider):
                     category=(it.get("type") or "").split(";")[-1],
                     sources=[self.name],
                     rating=_f(it.get("biz_ext", {}).get("rating")),
+                    url=amap_url,
+                    image_url=first_photo,
                 )
             )
             pois[-1].lng = _f(lng)
@@ -105,6 +113,12 @@ class TencentProvider(PoiProvider):
         pois: list[Poi] = []
         for it in (data.get("data") or [])[:_TOP_K]:
             loc = it.get("location") or {}
+            # 提取首张封面图
+            imgs = it.get("imgs") or []
+            first_img = (imgs[0] if imgs else None) or None
+            # 构造腾讯地图详情页 URL
+            poi_id = it.get("id", "")
+            tencent_url = f"https://lbs.qq.com/place/poi/{poi_id}" if poi_id else None
             pois.append(
                 Poi(
                     name=it.get("title", ""),
@@ -113,6 +127,8 @@ class TencentProvider(PoiProvider):
                     sources=[self.name],
                     lng=_f(loc.get("lng")),
                     lat=_f(loc.get("lat")),
+                    url=tencent_url,
+                    image_url=first_img,
                 )
             )
         return pois
@@ -135,15 +151,21 @@ class BaiduProvider(PoiProvider):
         pois: list[Poi] = []
         for it in (data.get("results") or [])[:_TOP_K]:
             loc = it.get("location") or {}
+            detail = it.get("detail_info") or {}
+            # 提取详情页 URL 和缩略图
+            baidu_url = detail.get("detail_url") or None
+            thumb = detail.get("thumbnail") or None
             pois.append(
                 Poi(
                     name=it.get("name", ""),
                     address=it.get("address", "") or "",
-                    category=(it.get("detail_info") or {}).get("tag", "") or "",
+                    category=detail.get("tag", "") or "",
                     sources=[self.name],
-                    rating=_f(it.get("detail_info", {}).get("overall_rating")),
+                    rating=_f(detail.get("overall_rating")),
                     lng=_f(loc.get("lng")),
                     lat=_f(loc.get("lat")),
+                    url=baidu_url,
+                    image_url=thumb,
                 )
             )
         return pois
@@ -187,18 +209,24 @@ class MockPoiProvider(PoiProvider):
     def search(self, city, query, client=None) -> list[Poi]:
         entries = self._KNOWN.get(city)
         if not entries:
+            search_url = f"https://uri.amap.com/search?query={city}+地标&city={city}"
             return [
                 Poi(name=f"{city}·城市地标", address=city, category="景点",
-                    sources=[self.name], ticket_price=0.0, is_mock=True)
+                    sources=[self.name], ticket_price=0.0, is_mock=True,
+                    url=search_url)
             ]
-        return [
-            Poi(
-                name=name, address=addr, category=cat, sources=[self.name],
-                verified=False, rating=rating, ticket_price=ticket,
-                open_hours=hours, description="内置演示数据(mock)", is_mock=True,
+        results = []
+        for name, addr, cat, ticket, rating, hours in entries:
+            search_url = f"https://uri.amap.com/search?query={name}&city={city}"
+            results.append(
+                Poi(
+                    name=name, address=addr, category=cat, sources=[self.name],
+                    verified=False, rating=rating, ticket_price=ticket,
+                    open_hours=hours, description="内置演示数据(mock)", is_mock=True,
+                    url=search_url,
+                )
             )
-            for name, addr, cat, ticket, rating, hours in entries
-        ]
+        return results
 
 
 def resolve_poi_providers(configured: dict[str, bool] | None = None) -> list[PoiProvider]:
@@ -243,6 +271,11 @@ def search_pois(
             continue
         g = groups.setdefault(key, {"name": p.name, "sources": set(), "poi": p, "n": 0})
         g["sources"].add(p.sources[0] if p.sources else "?")
+        # 优先保留有 url/image_url 的记录
+        if p.url and not g["poi"].url:
+            g["poi"].url = p.url
+        if p.image_url and not g["poi"].image_url:
+            g["poi"].image_url = p.image_url
         if p.ticket_price is not None and g["poi"].ticket_price is None:
             g["poi"] = p
 
