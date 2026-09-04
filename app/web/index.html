@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>旅行规划 Demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         max-width: 900px; margin: 0 auto; padding: 16px; line-height: 1.6; }
+  h1 { font-size: 1.3rem; } .muted { color: #777; font-size: .85rem; }
+  textarea { width: 100%; min-height: 64px; box-sizing: border-box; }
+  button { padding: 8px 18px; cursor: pointer; }
+  .banner { background: #fff4e5; border: 1px solid #ecc; border-radius: 8px; padding: 8px 12px;
+            font-size: .85rem; }
+  .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; margin: 10px 0; }
+  .day { background: rgba(120,120,120,.06); }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid #ddd; padding: 6px 10px; font-size: .9rem; }
+  .tag { display:inline-block; border-radius: 999px; padding: 0 8px; font-size: .78rem;
+         background:#eef; }
+  .tag.ok { background: #e7f6e7; color:#0a5; } .tag.warn { background:#fdf3e0; color:#a60; }
+  .err { color:#c00; white-space: pre-wrap; }
+  ul { margin: 4px 0 4px 18px; }
+</style>
+</head>
+<body>
+  <h1>🧳 旅行规划 Demo</h1>
+  <div class="banner">数据说明:景点来自高德/腾讯/百度多平台交叉(≥2 平台命中标「多平台确认」);未配置密钥时使用内置演示景点(mock)。
+  交通/住宿为演示数据。价格均以实际平台为准。</div>
+
+  <details id="cfg" style="margin:10px 0">
+    <summary>⚙️ 模型配置(用于语义理解 / 逐日规划 / 实时搜索;不配则用内置演示模式)</summary>
+    <div style="display:grid;gap:8px;margin-top:8px">
+      <label>Anthropic API Key
+        <input type="password" id="k_api" placeholder="sk-ant-…" autocomplete="off" style="width:100%" />
+      </label>
+      <label>Base URL(可选,走网关/代理)
+        <input type="text" id="k_base" placeholder="留空使用官方端点" style="width:100%" />
+      </label>
+      <div style="display:flex;gap:8px">
+        <label style="flex:1">解析模型<input type="text" id="k_parse" placeholder="claude-haiku-4-5" /></label>
+        <label style="flex:1">规划模型<input type="text" id="k_plan" placeholder="claude-sonnet-5" /></label>
+      </div>
+      <div>
+        <button type="button" id="cfg_save">保存</button>
+        <button type="button" id="cfg_test">测试连接</button>
+        <button type="button" id="cfg_clear">清除</button>
+        <span id="cfg_status" class="muted"></span>
+      </div>
+    </div>
+  </details>
+
+  <p><label for="text">你的旅行需求:</label></p>
+  <textarea id="text" placeholder="例:上海出发带老人去西安 5 天,人均 3000,偏人文古迹"></textarea>
+  <p>
+    <label><input type="checkbox" id="web" /> 启用实时网页检索(开放时间/票价/攻略,多花少量 token)</label>
+    <span style="display:inline-block;width:12px"></span>
+    <button id="go">生成计划</button>
+  </p>
+
+  <div id="out" hidden>
+    <div class="card" id="summary"></div>
+    <div class="card" id="days"></div>
+    <div class="card" id="pois"></div>
+    <div class="card" id="cost"></div>
+    <div class="card" id="reco"></div>
+  </div>
+  <div id="err" class="err" hidden></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+function escapeHtml(s){return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+$('#go').onclick = async () => {
+  const out = $('#out'), err = $('#err');
+  err.hidden = true; out.hidden = true;
+  const payload = { text: $('#text').value.trim(), web_research: $('#web').checked };
+  if (!payload.text) { err.textContent = '请先输入旅行需求。'; err.hidden = false; return; }
+  let data;
+  try {
+    const r = await fetch('/api/plan', { method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    data = await r.json();
+    if (!r.ok) throw new Error(typeof data.detail==='string' ? data.detail : JSON.stringify(data.detail));
+  } catch (e) { err.textContent = '请求失败:' + e.message; err.hidden = false; return; }
+  render(data);
+};
+
+function render(d) {
+  const flags = [
+    d.web_research_used ? '<span class="tag ok">已用实时网页资讯</span>' : '',
+    d.is_mock ? '<span class="tag warn">mock 演示数据</span>' : '<span class="tag ok">真实数据</span>',
+    d.budget_status==='over_budget' ? '<span class="tag warn">超出预算</span>' : '',
+  ].join(' ');
+  $('#summary').innerHTML =
+    `<b>${escapeHtml(d.request_summary)}</b> ${flags}<br><div class="muted">来源:${d.sources.join('、')}</div>`
+    + `<div style="margin-top:6px">${escapeHtml(d.note)}</div>`;
+
+  const daysHtml = (d.days||[]).map(x =>
+    `<div class="card day"><b>Day ${x.day} · ${escapeHtml(x.title)}</b>`
+    + `<ul>${x.activities.map(a=>`<li>${escapeHtml(a)}</li>`).join('')}</ul>`
+    + (x.lodging_note?`<div class="muted">${escapeHtml(x.lodging_note)}</div>`:'') + `</div>`).join('');
+  $('#days').innerHTML = `<b>逐日行程</b>` + (daysHtml || '<div class="muted">无</div>');
+
+  const poiRows = (d.pois||[]).map(p =>
+    `<tr><td>${escapeHtml(p.name)}${p.verified?'<span class="tag ok">多平台确认</span>':'<span class="tag warn">单平台</span>'}`
+    + `<div class="muted">${escapeHtml(p.address||'')}</div></td>`
+    + `<td>${escapeHtml(p.sources.join('、'))}</td>`
+    + `<td>${escapeHtml(p.category||'-')}</td>`
+    + `<td>${p.ticket_price==null?'以现场为准':p.ticket_price+' 元'}</td>`
+    + `<td>${escapeHtml(p.open_hours||'以官方为准')}</td></tr>`).join('');
+  $('#pois').innerHTML = `<b>候选景点(${(d.pois||[]).length})</b>`
+    + `<table><tr><th>名称</th><th>来源</th><th>类别</th><th>门票</th><th>开放</th></tr>${poiRows||'<tr><td colspan=5>无</td></tr>'}</table>`;
+
+  const c = d.cost_breakdown||{};
+  $('#cost').innerHTML = `<b>费用估算</b><table><tr><th>往返交通</th><th>住宿</th><th>门票</th>`
+    + `<th>餐饮</th><th>合计</th><th>人均</th></tr>`
+    + `<tr><td>${c.transport||0}</td><td>${c.hotels||0}</td><td>${c.tickets||0}</td>`
+    + `<td>${c.meals||0}</td><td><b>${c.total||0}</b></td><td><b>${c.per_person||0}</b></td></tr></table>`;
+
+  const recHtml = (d.recommendations||[]).map(r=>
+    `<div>· <b>${escapeHtml(r.label)}</b> — ${r.price} 元 <span class="muted">(${escapeHtml(r.reason)})</span></div>`).join('');
+  $('#reco').innerHTML = `<b>推荐</b>` + (recHtml||'<div class="muted">无</div>');
+  $('#out').hidden = false;
+  $('#out').scrollIntoView({behavior:'smooth'});
+}
+
+/* ---- 模型配置 ---- */
+function setCfgStatus(t) { $('#cfg_status').textContent = t; }
+async function refreshCfg() {
+  try {
+    const c = await (await fetch('/api/config/model')).json();
+    $('#k_api').placeholder = c.api_key_masked ? '已保存: ' + c.api_key_masked : 'sk-ant-…';
+    if (!c.api_key_masked) $('#k_api').value = '';
+    $('#k_parse').value = c.parse_model || '';
+    $('#k_plan').value = c.plan_model || '';
+    setCfgStatus(c.configured ? '已配置(真实大模型生效)' : '未配置 → 内置演示模式(启发式+模拟)');
+  } catch (e) { setCfgStatus('读取配置失败'); }
+}
+async function saveCfg() {
+  const body = {
+    api_key: $('#k_api').value, base_url: $('#k_base').value,
+    parse_model: $('#k_parse').value, plan_model: $('#k_plan').value,
+  };
+  const r = await fetch('/api/config/model', { method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const c = await r.json();
+  if (!r.ok) { setCfgStatus('保存失败:' + JSON.stringify(c.detail)); return; }
+  $('#k_api').value = '';
+  $('#k_parse').value = c.parse_model || ''; $('#k_plan').value = c.plan_model || '';
+  setCfgStatus('已保存' + (c.api_key_masked ? ' ' + c.api_key_masked : ',当前为演示模式'));
+}
+async function testCfg() {
+  setCfgStatus('测试中…');
+  const r = await fetch('/api/config/model/test', { method:'POST' });
+  const c = await r.json().catch(() => ({}));
+  setCfgStatus(r.ok ? ('连接 OK · ' + (c.model||'')) : ('连接失败:' + (c.detail || '未知错误')));
+}
+$('#cfg_save').onclick = saveCfg;
+$('#cfg_test').onclick = testCfg;
+$('#cfg_clear').onclick = async () => { $('#k_api').value=''; await saveCfg(); setCfgStatus('已清除配置,回到演示模式'); };
+refreshCfg();
+</script>
+</body>
+</html>

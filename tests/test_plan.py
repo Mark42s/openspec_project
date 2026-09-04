@@ -1,0 +1,199 @@
+"""端到端与单元测试。CI/本地均无 ANTHROPIC_API_KEY → 自动走确定性演示模式。
+
+覆盖 specs:意图解析、多源检索去重、无凭证兜底、预算不足提示、价格快照。
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app import costing, llm, model_runtime, poi
+from app.main import app
+from app.models import Poi, TripRequest
+from app.retrieval import search_all
+from app.store import connect, record_snapshot
+from app.suppliers import resolve_suppliers
+from app.suppliers.mock import MockAdapter
+
+client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _force_demo_mode(monkeypatch):
+    """保证走确定性演示模式,测试不依赖真实 LLM/POI 网络调用。"""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("TUNIU_API_KEY", raising=False)
+    monkeypatch.delenv("AMAP_KEY", raising=False)
+    monkeypatch.delenv("TENCENT_MAP_KEY", raising=False)
+    monkeypatch.delenv("BAIDU_MAP_KEY", raising=False)
+    model_runtime.reset()  # 忽略持久化文件,回到环境默认(未配置)
+
+
+def _sample_request() -> TripRequest:
+    return TripRequest(
+        origin="上海",
+        destinations=["西安"],
+        days=5,
+        adults=1,
+        elders=1,
+        per_person_budget=3000.0,
+        preferences=["人文"],
+    )
+
+
+class TestEndToEnd:
+    def test_healthz(self):
+        resp = client.get("/healthz")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+        assert resp.json()["llm_configured"] is False
+
+    def test_plan_happy_path(self):
+        resp = client.post(
+            "/api/plan", json={"text": "上海出发带老人去西安5天人均3000偏人文"}
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["is_mock"] is True
+        assert "mock" in body["sources"]
+        assert body["recorded_snapshot"] is True
+        assert body["budget_status"] in {"ok", "over_budget"}
+        assert len(body["recommendations"]) >= 1
+        assert body["per_person_estimate"] > 0
+        # 新能力:逐日路线、多平台景点、费用分解、实时资讯默认关
+        assert len(body["days"]) == 5
+        assert body["pois"]
+        assert body["cost_breakdown"]["total"] > 0
+        assert body["web_research_used"] is False
+
+    def test_web_page_served(self):
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "旅行规划" in resp.text
+
+    def test_plan_budget_over_flagged(self):
+        resp = client.post("/api/plan", json={"text": "上海去北京8天人均800"})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["budget_status"] == "over_budget"
+        assert "超出" in body["note"]
+
+    def test_plan_missing_destination_422(self):
+        resp = client.post("/api/plan", json={"text": "帮我随便规划一次旅行"})
+        assert resp.status_code == 422
+        assert "目的地" in resp.json()["detail"]["missing_fields"]
+
+
+class TestSuppliersAndStore:
+    def test_resolve_falls_back_to_mock_without_tuniu_credentials(self):
+        suppliers = resolve_suppliers(enable_tuniu=True)
+        assert [s.name for s in suppliers] == ["mock"]
+
+    def test_mock_is_deterministic_for_same_query(self):
+        a = search_all(_sample_request(), [MockAdapter()])
+        b = search_all(_sample_request(), [MockAdapter()])
+        # 忽略逐次不同的采集时间戳,比较去重键与价格
+        key_a = sorted((q.operator, q.price) for q in a.transport)
+        key_b = sorted((q.operator, q.price) for q in b.transport)
+        assert key_a == key_b
+        assert [h.name for h in a.hotels] == [h.name for h in b.hotels]
+        assert a.is_mock is True
+
+    def test_dedup_keeps_lowest_price_when_multiple_sources(self):
+        bundle = search_all(_sample_request(), [MockAdapter(), MockAdapter()])
+        keys = [q.dedup_key for q in bundle.transport]
+        assert len(keys) == len(set(keys))  # 无重复 key
+        assert all("+" in q.supplier for q in bundle.transport)  # 多源已合并
+
+    def test_snapshot_records_rows(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("PLANNER_DB_PATH", str(tmp_path / "t.db"))
+        request = _sample_request()
+        bundle = search_all(request, [MockAdapter()])
+        rows = record_snapshot(request, bundle)
+        assert rows == len(bundle.transport) + len(bundle.hotels)
+        with connect() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM price_snapshots").fetchone()[0]
+        assert count == rows
+
+
+class TestItinerary:
+    def _fake_provider(self, name, poi_name):
+        class _P(poi.PoiProvider):
+            def search(self, city, query, client=None):
+                return [Poi(name=poi_name, sources=[name])]
+
+        _P.name = name
+        return _P()
+
+    def test_poi_cross_verified_when_two_providers(self):
+        res = poi.search_pois(
+            "西安",
+            ["景点"],
+            [self._fake_provider("高德", "西安大雁塔"), self._fake_provider("腾讯", "大雁塔")],
+        )
+        assert any(p.verified and set(p.sources) == {"高德", "腾讯"} for p in res)
+
+    def test_poi_single_provider_not_verified(self):
+        res = poi.search_pois("西安", ["景点"], [self._fake_provider("高德", "西安大雁塔")])
+        assert res and all(p.verified is False for p in res)
+
+    def test_mock_poi_for_known_city(self):
+        res = poi.MockPoiProvider().search("西安", "景点")
+        assert res
+        assert all(p.is_mock for p in res)
+        assert res[0].ticket_price is not None
+
+    def test_cost_is_deterministic(self):
+        request = _sample_request()
+        bundle = search_all(request, [MockAdapter()])
+        pois = poi.MockPoiProvider().search("西安", "景点")
+        cost = costing.estimate_cost(request, bundle, pois, nights=4)
+        travelers = request.adults + request.elders + request.children
+        assert cost.total == cost.transport + cost.hotels + cost.tickets + cost.meals
+        assert cost.per_person == round(cost.total / travelers, 1)
+        assert cost.meals == (request.days or 1) * travelers * costing.MEAL_RATE
+
+
+class TestLocalTour:
+    def test_parse_local_tour_demo(self):
+        req = llm.parse_intent("苏州出发国庆带娃去周边自驾6天")
+        assert req.origin == "苏州"
+        assert req.destinations == ["苏州"]
+        assert req.local_tour is True
+        assert req.days == 6
+        assert "亲子" in req.preferences
+
+    def test_plan_local_tour_without_destination(self):
+        resp = client.post(
+            "/api/plan", json={"text": "苏州出发国庆带娃去周边自驾6天"}
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body["days"]) == 6
+        assert body["cost_breakdown"]["transport"] == 0.0
+        assert all(r["kind"] != "transport" for r in body["recommendations"])
+        assert body["pois"]
+
+
+class TestModelConfig:
+    def test_config_endpoints_roundtrip(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MODEL_CONFIG_PATH", str(tmp_path / "mc.json"))
+        got = client.get("/api/config/model").json()
+        assert got["configured"] is False
+
+        set_r = client.post(
+            "/api/config/model",
+            json={"api_key": "sk-ant-fakelongkey12345678", "parse_model": "claude-haiku-4-5"},
+        )
+        assert set_r.status_code == 200
+        info = set_r.json()
+        assert info["configured"] is True
+        assert "sk-ant-fakelongkey12345678" not in json.dumps(info, ensure_ascii=False)
+        assert info["api_key_masked"]
+
+        # 空串清除
+        clear = client.post("/api/config/model", json={"api_key": ""}).json()
+        assert clear["configured"] is False

@@ -1,0 +1,16 @@
+services:
+  web:
+    build: .
+    image: travel-planner:latest
+    ports:
+      - "8000:8000"
+    # 请先 cp .env.example .env 并填入 ANTHROPIC_API_KEY
+    env_file:
+      - .env
+    environment:
+      PLANNER_DB_PATH: /data/travel.db
+    volumes:
+      - planner-data:/data
+
+volumes:
+  planner-data:
