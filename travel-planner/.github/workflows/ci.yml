@@ -16,8 +16,11 @@ jobs:
           cache: pip
       - name: Install
         run: pip install -e ".[dev]"
+        working-directory: travel-planner
       - name: Ruff lint
         run: ruff check .
+        working-directory: travel-planner
       - name: Pytest
         # CI 无 ANTHROPIC_API_KEY,自动走确定性演示模式(mock),不产生真实模型调用
         run: pytest
+        working-directory: travel-planner
