@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import anthropic
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -32,8 +33,9 @@ class PlanRequest(BaseModel):
 
 
 class ModelConfigRequest(BaseModel):
-    api_key: str | None = Field(default=None, description="Anthropic API Key;空串表示清除")
+    api_key: str | None = Field(default=None, description="API Key;空串表示清除")
     base_url: str | None = Field(default=None, description="自定义端点(如网关/代理);空串清除")
+    provider: str | None = Field(default=None, description="供应商 anthropic/openai;空串恢复默认")
     parse_model: str | None = Field(default=None, description="意图解析模型;空串恢复默认")
     plan_model: str | None = Field(default=None, description="逐日规划模型;空串恢复默认")
 
@@ -92,6 +94,7 @@ def set_model_config(body: ModelConfigRequest) -> dict:
     model_runtime.set_config(
         api_key=body.api_key,
         base_url=body.base_url,
+        provider=body.provider,
         parse_model=body.parse_model,
         plan_model=body.plan_model,
     )
@@ -100,16 +103,28 @@ def set_model_config(body: ModelConfigRequest) -> dict:
 
 @app.post("/api/config/model/test")
 def test_model_config() -> dict:
-    """用已保存配置连通 Anthropic(仅查询模型元数据,不产生生成 token)。"""
+    """按供应商连通测试(仅查询模型元数据,不产生生成 token)。"""
     if not model_runtime.configured():
         raise HTTPException(status_code=400, detail="请先填写并保存 API Key 再测试。")
-    kwargs: dict = {"api_key": model_runtime.api_key()}
-    base = model_runtime.base_url()
-    if base:
-        kwargs["base_url"] = base
     try:
-        model = anthropic.Anthropic(**kwargs).models.retrieve(model=model_runtime.plan_model())
-    except anthropic.APIError as exc:
+        if model_runtime.provider() == "openai":
+            base = (model_runtime.base_url() or "https://api.deepseek.com").rstrip("/")
+            resp = httpx.get(
+                f"{base}/models",
+                headers={"Authorization": f"Bearer {model_runtime.api_key()}"},
+                timeout=30.0,
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(f"{resp.status_code} {resp.text[:300]}")
+            return {"ok": True, "model": model_runtime.plan_model()}
+        kwargs: dict = {"api_key": model_runtime.api_key()}
+        base = model_runtime.base_url()
+        if base:
+            kwargs["base_url"] = base
+        model = anthropic.Anthropic(**kwargs).models.retrieve(
+            model_id=model_runtime.plan_model()
+        )
+    except Exception as exc:  # noqa: BLE001 - 统一转 400,避免堆栈外泄为「未知错误」
         raise HTTPException(status_code=400, detail=f"连接失败: {exc}") from exc
     return {"ok": True, "model": getattr(model, "id", model_runtime.plan_model())}
 

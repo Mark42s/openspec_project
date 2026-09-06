@@ -29,6 +29,9 @@ def _force_demo_mode(monkeypatch):
     monkeypatch.delenv("AMAP_KEY", raising=False)
     monkeypatch.delenv("TENCENT_MAP_KEY", raising=False)
     monkeypatch.delenv("BAIDU_MAP_KEY", raising=False)
+    monkeypatch.delenv("PLANNER_PROVIDER", raising=False)
+    monkeypatch.delenv("PLANNER_PARSE_MODEL", raising=False)
+    monkeypatch.delenv("PLANNER_PLAN_MODEL", raising=False)
     model_runtime.reset()  # 忽略持久化文件,回到环境默认(未配置)
 
 
@@ -211,3 +214,76 @@ class TestModelConfig:
         # 空串清除
         clear = client.post("/api/config/model", json={"api_key": ""}).json()
         assert clear["configured"] is False
+
+    def test_provider_roundtrip_and_defaults(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MODEL_CONFIG_PATH", str(tmp_path / "mc.json"))
+        model_runtime.reset()
+        assert model_runtime.provider() == "anthropic"
+        assert model_runtime.parse_model() == "claude-haiku-4-5"
+        assert model_runtime.plan_model() == "claude-sonnet-5"
+
+        set_r = client.post(
+            "/api/config/model",
+            json={"api_key": "sk-fakelongkey12345678", "provider": "openai"},
+        )
+        assert set_r.status_code == 200
+        info = set_r.json()
+        assert info["provider"] == "openai"
+        assert info["parse_model"] == "deepseek-chat"
+        assert info["plan_model"] == "deepseek-chat"
+
+        # 显式指定模型优先
+        set_r2 = client.post(
+            "/api/config/model",
+            json={"provider": "openai", "plan_model": "deepseek-reasoner"},
+        )
+        assert set_r2.json()["plan_model"] == "deepseek-reasoner"
+
+        # 清空全部,回到 anthropic 默认
+        clear = client.post(
+            "/api/config/model",
+            json={"provider": "", "api_key": "", "parse_model": "", "plan_model": ""},
+        ).json()
+        assert clear["provider"] == "anthropic"
+        assert clear["parse_model"] == "claude-haiku-4-5"
+        assert clear["plan_model"] == "claude-sonnet-5"
+
+    def test_openai_parse_json_mode(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MODEL_CONFIG_PATH", str(tmp_path / "mc.json"))
+        model_runtime.reset()
+        model_runtime.set_config(
+            api_key="sk-test", provider="openai", base_url="https://api.deepseek.com"
+        )
+
+        class _FakeResp:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return {"choices": [{"message": {"content": json.dumps(
+                    {"origin": "上海", "destinations": ["西安"], "days": 5, "adults": 1,
+                     "elders": 0, "children": 0, "preferences": ["人文"], "local_tour": False}
+                )}}]}
+
+        captured = {}
+
+        def _fake_post(url, **kwargs):
+            captured["url"] = url
+            captured["payload"] = kwargs.get("json")
+            return _FakeResp()
+
+        monkeypatch.setattr("app.llm.httpx.post", _fake_post)
+        req = llm.parse_intent("上海去西安5天")
+        assert isinstance(req, TripRequest)
+        assert req.origin == "上海"
+        assert req.destinations == ["西安"]
+        assert captured["url"] == "https://api.deepseek.com/chat/completions"
+        assert captured["payload"]["model"] == "deepseek-chat"
+        assert captured["payload"]["response_format"] == {"type": "json_object"}
+
+    def test_gather_live_info_disabled_for_openai(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MODEL_CONFIG_PATH", str(tmp_path / "mc.json"))
+        model_runtime.reset()
+        model_runtime.set_config(api_key="sk-test", provider="openai")
+        pois = [Poi(name="测试景点", sources=["mock"])]
+        assert llm.gather_live_info(pois, enabled=True) == ""

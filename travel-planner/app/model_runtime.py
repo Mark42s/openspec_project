@@ -13,8 +13,15 @@ from pathlib import Path
 
 DEFAULT_PARSE_MODEL = "claude-haiku-4-5"
 DEFAULT_PLAN_MODEL = "claude-sonnet-5"
+OPENAI_DEFAULT_MODEL = "deepseek-chat"
 
-_state: dict = {"api_key": None, "base_url": None, "parse_model": None, "plan_model": None}
+_state: dict = {
+    "api_key": None,
+    "base_url": None,
+    "provider": None,
+    "parse_model": None,
+    "plan_model": None,
+}
 _loaded = False
 
 
@@ -30,6 +37,7 @@ def _env_defaults() -> dict:
     return {
         "api_key": os.getenv("ANTHROPIC_API_KEY", "").strip() or None,
         "base_url": os.getenv("ANTHROPIC_BASE_URL", "").strip() or None,
+        "provider": os.getenv("PLANNER_PROVIDER", "").strip() or None,
         "parse_model": os.getenv("PLANNER_PARSE_MODEL", "").strip() or None,
         "plan_model": os.getenv("PLANNER_PLAN_MODEL", "").strip() or None,
     }
@@ -78,19 +86,29 @@ def base_url() -> str | None:
     return _state["base_url"]
 
 
+def provider() -> str:
+    _ensure_loaded()
+    return _state["provider"] or "anthropic"
+
+
 def parse_model() -> str:
     _ensure_loaded()
-    return _state["parse_model"] or DEFAULT_PARSE_MODEL
+    if _state["parse_model"]:
+        return _state["parse_model"]
+    return OPENAI_DEFAULT_MODEL if provider() == "openai" else DEFAULT_PARSE_MODEL
 
 
 def plan_model() -> str:
     _ensure_loaded()
-    return _state["plan_model"] or DEFAULT_PLAN_MODEL
+    if _state["plan_model"]:
+        return _state["plan_model"]
+    return OPENAI_DEFAULT_MODEL if provider() == "openai" else DEFAULT_PLAN_MODEL
 
 
 def set_config(
     api_key: str | None = None,
     base_url: str | None = None,
+    provider: str | None = None,
     parse_model: str | None = None,
     plan_model: str | None = None,
     persist: bool = True,
@@ -100,6 +118,7 @@ def set_config(
     for name, value in (
         ("api_key", api_key),
         ("base_url", base_url),
+        ("provider", provider),
         ("parse_model", parse_model),
         ("plan_model", plan_model),
     ):
@@ -129,6 +148,7 @@ def public_info() -> dict:
         "configured": bool(key),
         "api_key_masked": _mask(key),
         "base_url": _state["base_url"] or None,
+        "provider": provider(),
         "parse_model": parse_model(),
         "plan_model": plan_model(),
     }

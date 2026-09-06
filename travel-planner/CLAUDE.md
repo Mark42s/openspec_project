@@ -71,9 +71,10 @@ cp .env.example .env              # 再填自己的密钥,见「配置与密钥�
 ## 配置与密钥
 
 - **`.env` 已被 gitignore**,每台机器自己 `cp .env.example .env` 再填。已有键:`AMAP_KEY`(真实,已配)、`POI_PROVIDERS=amap`。
-- **页面模型配置**保存到 `data/model_config.json`(也 gitignore):保存 Anthropic Key 即运行时生效,不配则演示模式。Key 明文落盘,注意保管。
+- **页面模型配置**保存到 `data/model_config.json`(也 gitignore):保存 API Key 即运行时生效,不配则演示模式。Key 明文落盘,注意保管。
+- **供应商切换**:`provider` 取值 `anthropic`(默认)/ `openai`(OpenAI 兼容,如 DeepSeek)。`openai` 时 base_url 默认 `https://api.deepseek.com`、模型默认 `deepseek-chat`;实时网页检索仅 Anthropic 可用(`openai` 下自动关闭,`web_research_used=false`)。页面「⚙️ 模型配置」有供应商下拉;环境变量 `PLANNER_PROVIDER` 可设默认。
 - 真实链路三平台 key 含义:AMAP/TENCENT/BAIDU(高德/腾讯/百度 POI);只配高德时,单平台命中不标「多平台确认」。缺 key 自动回落内置演示景点(mock)。
-- `WEB_RESEARCH_ENABLED=0` 默认关;页面勾选或用 `web_research:true` 单次开。实时网页检索需已配置模型。
+- `WEB_RESEARCH_ENABLED=0` 默认关;页面勾选或用 `web_research:true` 单次开。实时网页检索需已配置模型(且 provider=anthropic)。
 
 ## 测试约定
 

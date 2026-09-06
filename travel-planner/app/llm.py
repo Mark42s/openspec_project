@@ -10,11 +10,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
-from typing import Literal
+from typing import Literal, TypeVar
 
 import anthropic
+import httpx
 from pydantic import BaseModel, Field
 
 from app import model_runtime as rt
@@ -63,6 +65,10 @@ def configured() -> bool:
     return rt.configured()
 
 
+def provider() -> str:
+    return rt.provider()
+
+
 def _client() -> anthropic.Anthropic:
     kwargs: dict = {}
     key = rt.api_key()
@@ -89,6 +95,42 @@ def web_research_enabled() -> bool:
 
 # ---------------------------------------------------------------- 第一段:意图解析
 
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
+
+
+def _openai_parse(prompt: str, output_model: type[_ModelT], model: str) -> _ModelT:
+    """OpenAI 兼容(DeepSeek)JSON 模式:POST /chat/completions → pydantic 校验。"""
+    base = (rt.base_url() or "https://api.deepseek.com").rstrip("/")
+    key = rt.api_key()
+    schema = output_model.model_json_schema()
+    full_prompt = (
+        "请严格只输出一个 JSON 对象,不要输出任何 JSON 以外的文字或代码块标记。"
+        f"JSON 的字段与类型必须符合以下 schema:\n{json.dumps(schema, ensure_ascii=False)}\n"
+        f"任务:\n{prompt}"
+    )
+    try:
+        resp = httpx.post(
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": full_prompt}],
+                "response_format": {"type": "json_object"},
+                "temperature": 0,
+            },
+            timeout=60.0,
+        )
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"OpenAI 兼容调用失败: {exc}") from exc
+    if resp.status_code != 200:
+        raise RuntimeError(f"OpenAI 兼容调用失败: {resp.status_code} {resp.text[:300]}")
+    try:
+        content = resp.json()["choices"][0]["message"]["content"]
+        return output_model.model_validate(json.loads(content))
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"OpenAI 兼容响应解析失败: {exc}") from exc
+
+
 def parse_intent(text: str) -> TripRequest:
     """把自然语言解析为结构化约束。无 key 时退化为确定性规则解析。"""
     if not configured():
@@ -101,6 +143,8 @@ def parse_intent(text: str) -> TripRequest:
         "把 destinations 设为 [出发地] 并把 local_tour 置为 true,不要加入 missing_fields。\n"
         "文本:\n" + text
     )
+    if provider() == "openai":
+        return _openai_parse(prompt, TripRequest, parse_model())
     try:
         resp = _client().messages.parse(
             model=parse_model(),
@@ -203,16 +247,19 @@ def build_plan(
         f"可安排景点:\n{poi_lines or '(无)'}\n"
         f"实时资讯(可选参考):\n{live_info or '(未启用网页检索)'}"
     )
-    try:
-        resp = _client().messages.parse(
-            model=plan_model(),
-            max_tokens=8000,
-            messages=[{"role": "user", "content": prompt}],
-            output_format=ItineraryPlan,
-        )
-        p = resp.parsed_output
-    except anthropic.APIError as exc:
-        raise RuntimeError(f"逐日规划调用失败: {exc}") from exc
+    if provider() == "openai":
+        p = _openai_parse(prompt, ItineraryPlan, plan_model())
+    else:
+        try:
+            resp = _client().messages.parse(
+                model=plan_model(),
+                max_tokens=8000,
+                messages=[{"role": "user", "content": prompt}],
+                output_format=ItineraryPlan,
+            )
+            p = resp.parsed_output
+        except anthropic.APIError as exc:
+            raise RuntimeError(f"逐日规划调用失败: {exc}") from exc
 
     over = request.per_person_budget is not None and cost.per_person > request.per_person_budget
     return PlanResponse(
@@ -240,6 +287,8 @@ def gather_live_info(pois: list[Poi], enabled: bool | None = None) -> str:
     on = enabled if enabled is not None else web_research_enabled()
     if not (configured() and on and pois):
         return ""
+    if provider() != "anthropic":
+        return ""  # OpenAI 兼容协议无 web_search 服务端工具
     names = "\n".join(f"- {p.name}: {p.description or '游览'}" for p in pois[:6])
     prompt = (
         "请对下列中文景点检索实时开放时间与门票价格等最新信息(近期公告/预约要求),"

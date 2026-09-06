@@ -100,7 +100,13 @@
   <details id="cfg" style="margin:10px 0">
     <summary>⚙️ 模型配置(用于语义理解 / 逐日规划 / 实时搜索;不配则用内置演示模式)</summary>
     <div style="display:grid;gap:8px;margin-top:8px">
-      <label>Anthropic API Key
+      <label>供应商
+        <select id="k_provider" style="width:100%">
+          <option value="anthropic">Anthropic(Claude)</option>
+          <option value="openai">OpenAI 兼容(DeepSeek 等)</option>
+        </select>
+      </label>
+      <label>API Key
         <input type="password" id="k_api" placeholder="sk-ant-…" autocomplete="off" style="width:100%" />
       </label>
       <label>Base URL(可选,走网关/代理)
@@ -318,11 +324,21 @@ function render(d) {
 
 /* ---- 模型配置 ---- */
 function setCfgStatus(t) { $('#cfg_status').textContent = t; }
+function applyProviderPlaceholders(isOpen) {
+  $('#k_base').placeholder = isOpen ? 'https://api.deepseek.com(留空默认)' : '留空使用官方端点';
+  $('#k_parse').placeholder = isOpen ? 'deepseek-chat(留空默认)' : 'claude-haiku-4-5';
+  $('#k_plan').placeholder = isOpen ? 'deepseek-chat(留空默认)' : 'claude-sonnet-5';
+  $('#k_api').placeholder = isOpen ? 'sk-…' : 'sk-ant-…';
+}
 async function refreshCfg() {
   try {
     const c = await (await fetch('/api/config/model')).json();
-    $('#k_api').placeholder = c.api_key_masked ? '已保存: ' + c.api_key_masked : 'sk-ant-…';
+    const isOpen = c.provider === 'openai';
+    $('#k_provider').value = c.provider || 'anthropic';
+    applyProviderPlaceholders(isOpen);
+    if (c.api_key_masked) $('#k_api').placeholder = '已保存: ' + c.api_key_masked;
     if (!c.api_key_masked) $('#k_api').value = '';
+    $('#k_base').value = c.base_url || '';
     $('#k_parse').value = c.parse_model || '';
     $('#k_plan').value = c.plan_model || '';
     setCfgStatus(c.configured ? '已配置(真实大模型生效)' : '未配置 → 内置演示模式(启发式+模拟)');
@@ -331,6 +347,7 @@ async function refreshCfg() {
 async function saveCfg() {
   const body = {
     api_key: $('#k_api').value, base_url: $('#k_base').value,
+    provider: $('#k_provider').value,
     parse_model: $('#k_parse').value, plan_model: $('#k_plan').value,
   };
   const r = await fetch('/api/config/model', { method:'POST',
@@ -347,9 +364,20 @@ async function testCfg() {
   const c = await r.json().catch(() => ({}));
   setCfgStatus(r.ok ? ('连接 OK · ' + (c.model||'')) : ('连接失败:' + (c.detail || '未知错误')));
 }
+$('#k_provider').onchange = () => {
+  const isOpen = $('#k_provider').value === 'openai';
+  // 切换供应商后清空 base_url/模型(保留 API Key),让后端按供应商默认值生效
+  $('#k_base').value = ''; $('#k_parse').value = ''; $('#k_plan').value = '';
+  applyProviderPlaceholders(isOpen);
+};
 $('#cfg_save').onclick = saveCfg;
 $('#cfg_test').onclick = testCfg;
-$('#cfg_clear').onclick = async () => { $('#k_api').value=''; await saveCfg(); setCfgStatus('已清除配置,回到演示模式'); };
+$('#cfg_clear').onclick = async () => {
+  $('#k_api').value=''; $('#k_base').value=''; $('#k_parse').value=''; $('#k_plan').value='';
+  $('#k_provider').value='anthropic';
+  await saveCfg();
+  setCfgStatus('已清除配置,回到演示模式');
+};
 refreshCfg();
 </script>
 </body>
