@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import date
 from typing import Literal, TypeVar
 
 import anthropic
@@ -135,8 +136,11 @@ def parse_intent(text: str) -> TripRequest:
     """把自然语言解析为结构化约束。无 key 时退化为确定性规则解析。"""
     if not configured():
         return _heuristic_parse(text)
+    today = date.today()
     prompt = (
         "把下面的中文旅行需求解析为结构化约束。\n"
+        f"今天是 {today.isoformat()}。用户提到日期但未说明年份时按今年解析;"
+        "若该日期已过则按明年解析。\n"
         "规则:只能从文本推断,不要编造;无法确定的必填信息(出发地/目的地/出发日期/天数)置空,"
         "并把该字段名加入 missing_fields;目的地可有多个候选,按文本偏好排序。\n"
         "若用户未指明具体目的地但提到 周边/自驾/附近/省内 等,"
@@ -144,17 +148,33 @@ def parse_intent(text: str) -> TripRequest:
         "文本:\n" + text
     )
     if provider() == "openai":
-        return _openai_parse(prompt, TripRequest, parse_model())
-    try:
-        resp = _client().messages.parse(
-            model=parse_model(),
-            max_tokens=4000,
-            messages=[{"role": "user", "content": prompt}],
-            output_format=TripRequest,
-        )
-        return resp.parsed_output
-    except anthropic.APIError as exc:
-        raise RuntimeError(f"意图解析调用失败: {exc}") from exc
+        req = _openai_parse(prompt, TripRequest, parse_model())
+    else:
+        try:
+            resp = _client().messages.parse(
+                model=parse_model(),
+                max_tokens=4000,
+                messages=[{"role": "user", "content": prompt}],
+                output_format=TripRequest,
+            )
+            req = resp.parsed_output
+        except anthropic.APIError as exc:
+            raise RuntimeError(f"意图解析调用失败: {exc}") from exc
+    return _clamp_start_date(req)
+
+
+def _clamp_start_date(req: TripRequest) -> TripRequest:
+    """确定性兜底:LLM 可能把年份猜错,把早于今天的出发日期滚到最近的未来同月日。"""
+    if not req.start_date:
+        return req
+    d = req.start_date
+    while d < date.today():
+        try:
+            d = d.replace(year=d.year + 1)
+        except ValueError:  # 2月29日 落在非闰年
+            d = d.replace(year=d.year + 1, day=28)
+    req.start_date = d
+    return req
 
 
 def _heuristic_parse(text: str) -> TripRequest:
@@ -325,8 +345,10 @@ def _poi_line(p: Poi) -> str:
 
 
 def _fmt_transport(q: TransportQuote) -> str:
+    from_label = q.departure_station or q.from_city
+    to_label = q.arrival_station or q.to_city
     return (
-        f"[交通 {q.supplier}] {q.mode}:{q.operator} {q.from_city}→{q.to_city} "
+        f"[交通 {q.supplier}] {q.mode}:{q.operator} {from_label}→{to_label} "
         f"{q.departure_time}-{q.arrival_time} {q.price:.0f}元 {q.travel_class}"
     )
 

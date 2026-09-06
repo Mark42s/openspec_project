@@ -35,6 +35,8 @@ class TransportQuote(BaseModel):
     from_city: str
     to_city: str
     operator: str = Field(description="车次或航班号")
+    departure_station: str = Field(default="", description="出发站/机场(如 苏州北/硕放T2)")
+    arrival_station: str = Field(default="", description="到达站/机场(如 贵阳北/龙洞堡T2)")
     departure_time: str
     arrival_time: str
     price: float

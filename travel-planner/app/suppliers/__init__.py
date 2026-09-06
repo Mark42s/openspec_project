@@ -1,4 +1,4 @@
-"""供应商注册工厂:按环境变量决定启用哪些源(无凭证时仅 mock)。"""
+"""供应商注册工厂:有真实凭证时用真实源,无凭证时仅 mock 兜底。"""
 
 from __future__ import annotations
 
@@ -12,22 +12,14 @@ from app.suppliers.tuniu import TuniuAdapter
 def resolve_suppliers(enable_tuniu: bool | None = None) -> list[SupplierAdapter]:
     """返回启用的适配器列表。
 
-    enable_tuniu 未指定时读环境变量 `TUNIU_ENABLED`(1/true 开启)。
-    途牛实例化失败(缺凭证)不影响 mock 兜底。
+    enable_tuniu 未指定时按是否有 TUNIU_API_KEY 自动决定。真实源可用时
+    不混入 mock(避免假车次污染真实结果);只有全部真实源不可用时才回落 mock。
     """
-    suppliers: list[SupplierAdapter] = [MockAdapter()]
     if enable_tuniu is None:
-        enable_tuniu = os_env_flag("TUNIU_ENABLED", False)
+        enable_tuniu = bool(os.getenv("TUNIU_API_KEY", "").strip())
     if enable_tuniu:
         try:
-            suppliers.append(TuniuAdapter())
+            return [TuniuAdapter()]
         except QueryError:
             pass
-    return suppliers
-
-
-def os_env_flag(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return [MockAdapter()]

@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import json
+from datetime import date
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,6 +19,7 @@ from app.retrieval import search_all
 from app.store import connect, record_snapshot
 from app.suppliers import resolve_suppliers
 from app.suppliers.mock import MockAdapter
+from app.suppliers.tuniu import TuniuAdapter
 
 client = TestClient(app)
 
@@ -299,3 +302,98 @@ class TestModelConfig:
         # 误填网页控制台 → 纠正为 api.deepseek.com
         model_runtime.set_config(base_url="https://platform.deepseek.com")
         assert model_runtime.effective_base_url() == "https://api.deepseek.com"
+
+
+class _FakeResp:
+    status_code = 200
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def _mcp_env(business: dict) -> str:
+    inner = json.dumps(business, ensure_ascii=False)
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {"content": [{"type": "text", "text": inner}]},
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+class TestTuniuAdapter:
+    def test_transport_mapping_train_and_flight(self, monkeypatch):
+        monkeypatch.setenv("TUNIU_API_KEY", "sk-test")
+        train = {"data": [{
+            "trainNum": "G203", "departStationName": "张家港", "destStationName": "贵阳北",
+            "departureTime": "2026-09-29 07:30", "arrivalTime": "2026-09-29 15:14",
+            "price": {"edzPrice": "943", "ydzPrice": "1496", "swzPrice": "3292"},
+        }]}
+        flight = {"data": [{
+            "flightNumber": "AQ1332", "departureAirport": "硕放", "departureTerminal": "T2",
+            "arrivalAirport": "龙洞堡", "arrivalTerminal": "T2",
+            "departureTime": "2026-09-29 17:00", "arrivalTime": "2026-09-29 19:40",
+            "basePrice": "799", "totalTax": "120", "cabinClass": "经济舱",
+        }]}
+
+        def _fake_post(url, **kwargs):
+            text = _mcp_env(train) if "/train" in url else _mcp_env(flight)
+            return _FakeResp(text)
+
+        monkeypatch.setattr("app.suppliers.tuniu.httpx.post", _fake_post)
+        q = SimpleNamespace(
+            origin="苏州", destination="贵阳", travel_date=date(2026, 9, 29), travelers=2
+        )
+        quotes = TuniuAdapter().search_transport(q)
+        assert {x.mode for x in quotes} == {"train", "flight"}
+
+        t = next(x for x in quotes if x.mode == "train")
+        assert t.operator == "G203"
+        assert t.price == 943.0
+        assert t.travel_class == "二等座"
+        assert t.departure_station == "张家港"
+        assert t.arrival_station == "贵阳北"
+        assert t.departure_time == "07:30"
+
+        f = next(x for x in quotes if x.mode == "flight")
+        assert f.operator == "AQ1332"
+        assert f.price == 919.0  # basePrice + totalTax
+        assert f.travel_class == "经济舱"
+        assert f.departure_station == "硕放T2"
+
+    def test_hotel_mapping(self, monkeypatch):
+        monkeypatch.setenv("TUNIU_API_KEY", "sk-test")
+        hotel = {"hotels": [{
+            "hotelName": "希岸·轻雅酒店", "roomName": "高级大床房", "lowestPrice": 377,
+            "commentScore": 5, "refund": "限时取消",
+        }]}
+
+        def _fake_post(url, **kwargs):
+            return _FakeResp(_mcp_env(hotel))
+
+        monkeypatch.setattr("app.suppliers.tuniu.httpx.post", _fake_post)
+        q = SimpleNamespace(city="贵阳", check_in=date(2026, 9, 29), nights=6, travelers=2)
+        quotes = TuniuAdapter().search_hotel(q)
+        assert len(quotes) == 1
+        h = quotes[0]
+        assert h.name == "希岸·轻雅酒店"
+        assert h.room_type == "高级大床房"
+        assert h.price_per_night == 377.0
+        assert h.rating == 5.0
+        assert h.is_refundable is True
+
+    def test_resolve_suppliers_uses_tuniu_when_key(self, monkeypatch):
+        monkeypatch.setenv("TUNIU_API_KEY", "sk-test")
+        assert [s.name for s in resolve_suppliers()] == ["tuniu"]
+
+    def test_resolve_suppliers_falls_back_to_mock_without_key(self):
+        assert [s.name for s in resolve_suppliers()] == ["mock"]
+
+
+def test_clamp_start_date_rolls_past_forward():
+    from app.llm import _clamp_start_date
+
+    req = TripRequest(origin="苏州", destinations=["贵阳"], start_date=date(2023, 9, 29))
+    out = _clamp_start_date(req)
+    assert out.start_date >= date.today()
+    assert (out.start_date.month, out.start_date.day) == (9, 29)
