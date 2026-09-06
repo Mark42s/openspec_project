@@ -97,13 +97,23 @@ class Poi(BaseModel):
     website: str | None = Field(default=None, description="景点官网或百科链接")
 
 
+class Activity(BaseModel):
+    """逐日行程中的一段结构化活动(spec: 结构化逐日行程)。"""
+
+    time: str = Field(default="", description="时段,如 09:00-11:30")
+    title: str = Field(description="活动内容,如 游览甲秀楼")
+    kind: str = Field(default="sight", description="transport/meal/sight/hotel/rest/note")
+    poi_name: str = Field(default="", description="关联景点名,用于前端富化")
+    note: str = Field(default="", description="补充说明")
+
+
 class ItineraryDay(BaseModel):
     """逐日行程的一天(spec: 逐日行程规划)。"""
 
     day: int
     date_label: str = ""
     title: str
-    activities: list[str] = Field(default_factory=list, description="当日安排,如 09:00 参观兵马俑")
+    activities: list[Activity] = Field(default_factory=list, description="当日结构化安排")
     lodging_note: str = ""
 
 
@@ -144,3 +154,4 @@ class PlanResponse(BaseModel):
     is_mock: bool = True
     sources: list[str] = Field(default_factory=list)
     recorded_snapshot: bool = False
+    session_id: str | None = Field(default=None, description="会话 ID,用于多轮细化")

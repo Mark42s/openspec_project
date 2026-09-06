@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from app import model_runtime as rt
 from app.models import (
+    Activity,
     CostBreakdown,
     ItineraryDay,
     PlanRecommendation,
@@ -235,6 +236,70 @@ def _mark_missing(req: TripRequest) -> None:
     req.missing_fields = missing
 
 
+def parse_feedback(prior: TripRequest, feedback: str) -> TripRequest:
+    """把用户对现有计划的追问合并进结构化约束;无 key 时确定性合并。"""
+    if not configured():
+        return _merge_feedback_heuristic(prior, feedback)
+    today = date.today()
+    prompt = (
+        "把用户对现有旅行计划追加的反馈合并进结构化约束,输出合并后的完整约束。\n"
+        f"今天是 {today.isoformat()}。用户提到日期但未说明年份时按今年解析;"
+        "若该日期已过则按明年解析。\n"
+        "规则:未在反馈中提及的字段保持原值;只在反馈明确要求时修改(如「预算降到2000」「改成5天」「去杭州」「带上孩子」)。"
+        "若反馈只是调整行程(如「第二天轻松点」),约束保持不变、按原值输出。\n"
+        f"现有约束:\n{prior.model_dump(mode='json', exclude={'missing_fields'})}\n"
+        f"用户反馈:\n{feedback}"
+    )
+    if provider() == "openai":
+        req = _openai_parse(prompt, TripRequest, parse_model())
+    else:
+        try:
+            resp = _client().messages.parse(
+                model=parse_model(),
+                max_tokens=4000,
+                messages=[{"role": "user", "content": prompt}],
+                output_format=TripRequest,
+            )
+            req = resp.parsed_output
+        except anthropic.APIError as exc:
+            raise RuntimeError(f"追问解析调用失败: {exc}") from exc
+    return _clamp_start_date(req)
+
+
+def _merge_feedback_heuristic(prior: TripRequest, feedback: str) -> TripRequest:
+    """无 key:确定性把反馈覆盖进既有约束(只改反馈明确提到的字段)。"""
+    req = prior.model_copy(deep=True)
+
+    m = re.search(r"(?:人均|预算)[^0-9]*?(\d+(?:\.\d+)?)", feedback)
+    if m:
+        req.per_person_budget = float(m.group(1))
+
+    m = re.search(r"(\d{1,2})\s*(?:天|日)", feedback)
+    if m:
+        req.days = int(m.group(1))
+
+    m = re.search(r"(?:改去|去|到|换成|改成)\s*([一-龥]{2,4})", feedback)
+    if m and m.group(1) in _CITIES:
+        req.destinations = [m.group(1)]
+        req.local_tour = False
+
+    if _LOCAL_HINTS.search(feedback):
+        req.local_tour = True
+        req.destinations = [req.origin] if req.origin else req.destinations
+
+    for pref, keys in _PREF_TRIGGERS.items():
+        if any(k in feedback for k in keys) and pref not in req.preferences:
+            req.preferences.append(pref)
+
+    if re.search(r"老人", feedback):
+        req.elders = max(req.elders, 1)
+    if re.search(r"亲子|带娃|小孩|孩子", feedback):
+        req.children = max(req.children, 1)
+
+    _mark_missing(req)
+    return req
+
+
 # ---------------------------------------------------------------- 第二段:汇总建议
 
 def build_plan(
@@ -262,6 +327,9 @@ def build_plan(
         "2) 每日 2-3 个景点,按地理位置就近编排,含餐饮与大致时段;\n"
         "3) 带老人/慢节奏则每日最多 2 个点并安排午间休息;亲子则留亲子友好时段;\n"
         "4) 费用请勿自行估算(系统会确定性计算);note 写中文权衡与提醒。\n"
+        "5) activities 用结构化时段:每项含 time(如 '09:00-11:30')、title(内容)、"
+        "kind(transport/meal/sight/hotel/rest/note 之一)、poi_name(对应景点名,无则留空);"
+        "首日含抵达交通、末日含返程。\n"
         f"用户约束:\n{request.model_dump(mode='json', exclude={'missing_fields'})}\n"
         f"交通/住宿候选:\n{block or '(无)'}\n"
         f"可安排景点:\n{poi_lines or '(无)'}\n"
@@ -281,6 +349,18 @@ def build_plan(
         except anthropic.APIError as exc:
             raise RuntimeError(f"逐日规划调用失败: {exc}") from exc
 
+    return _assemble_plan(request, bundle, pois, cost, p, live_info)
+
+
+def _assemble_plan(
+    request: TripRequest,
+    bundle: ResultBundle,
+    pois: list[Poi],
+    cost: CostBreakdown,
+    p: ItineraryPlan,
+    live_info: str,
+) -> PlanResponse:
+    """把模型的 ItineraryPlan 与确定性费用/来源合并为最终响应(build_plan 与 refine_plan 共用)。"""
     over = request.per_person_budget is not None and cost.per_person > request.per_person_budget
     return PlanResponse(
         request_summary=p.request_summary,
@@ -296,6 +376,76 @@ def build_plan(
         sources=bundle.sources,
         recorded_snapshot=False,
     )
+
+
+def refine_plan(
+    request: TripRequest,
+    bundle: ResultBundle,
+    pois: list[Poi],
+    cost: CostBreakdown,
+    prior: PlanResponse,
+    feedback: str,
+    live_info: str = "",
+) -> PlanResponse:
+    """在上一版计划基础上按反馈更新,输出新的结构化逐日行程。"""
+    pois = pois or []
+    if not configured():
+        return _refine_plan_demo(request, bundle, pois, cost, feedback)
+
+    block = "\n".join(
+        [_fmt_transport(q) for q in bundle.transport]
+        + [_fmt_hotel(h) for h in bundle.hotels]
+    )
+    poi_lines = "\n".join(_poi_line(p) for p in pois)
+    prior_days = "\n".join(
+        f"Day {d.day} {d.title}: "
+        + " / ".join(f"{a.time or '—'} {a.title}" for a in d.activities)
+        for d in prior.days
+    )
+    prompt = (
+        "你是旅游规划师。用户对上一版行程提出了反馈,请在其基础上更新出新的逐日行程。\n"
+        "规则:\n"
+        "1) 尊重反馈:能改的改、不能改的说明;不要丢弃用户此前满意的部分,除非反馈要求;\n"
+        "2) days 数组长度=行程天数;首日为抵达+入住,末日宽松并留返程;\n"
+        "3) 每日 2-3 个景点,带老人/慢节奏每日最多 2 点并安排午休;亲子留亲子友好时段;\n"
+        "4) 费用请勿自行估算(系统会确定性计算);note 写中文权衡与提醒,并说明本次改了什么;\n"
+        "5) activities 用结构化时段:每项含 time(如 '09:00-11:30')、title、"
+        "kind(transport/meal/sight/hotel/rest/note)、poi_name(对应景点名,无则留空)。\n"
+        f"用户约束:\n{request.model_dump(mode='json', exclude={'missing_fields'})}\n"
+        f"上一版逐日行程:\n{prior_days or '(无)'}\n"
+        f"用户反馈:\n{feedback}\n"
+        f"交通/住宿候选:\n{block or '(无)'}\n"
+        f"可安排景点:\n{poi_lines or '(无)'}\n"
+        f"实时资讯(可选参考):\n{live_info or '(未启用)'}"
+    )
+    if provider() == "openai":
+        p = _openai_parse(prompt, ItineraryPlan, plan_model())
+    else:
+        try:
+            resp = _client().messages.parse(
+                model=plan_model(),
+                max_tokens=8000,
+                messages=[{"role": "user", "content": prompt}],
+                output_format=ItineraryPlan,
+            )
+            p = resp.parsed_output
+        except anthropic.APIError as exc:
+            raise RuntimeError(f"细化规划调用失败: {exc}") from exc
+
+    return _assemble_plan(request, bundle, pois, cost, p, live_info)
+
+
+def _refine_plan_demo(
+    request: TripRequest,
+    bundle: ResultBundle,
+    pois: list[Poi],
+    cost: CostBreakdown,
+    feedback: str,
+) -> PlanResponse:
+    """无 key:复用演示规划,并在 note 里标注按反馈调整。"""
+    plan = _build_plan_demo(request, bundle, pois, cost)
+    plan.note = f"已按你的反馈「{feedback}」调整。" + plan.note
+    return plan
 
 
 def gather_live_info(pois: list[Poi], enabled: bool | None = None) -> str:
@@ -470,29 +620,51 @@ def _demo_days(
 
     days: list[ItineraryDay] = []
     for d in range(1, days_n + 1):
-        acts: list[str] = []
+        acts: list[Activity] = []
         if d == 1:
             if request.local_tour:
                 acts.append(
-                    f"{request.origin or '本地'} 自驾出发,入住 {city} 周边/市区酒店,不安排长途交通"
+                    Activity(
+                        time="09:00",
+                        kind="transport",
+                        title=(
+                            f"{request.origin or '本地'} 自驾出发,"
+                            f"入住 {city} 周边/市区酒店,不安排长途交通"
+                        ),
+                    )
                 )
             else:
                 acts.append(
-                    f"乘 {transport.operator if transport else '交通'} "
-                    f"抵达 {city},入住酒店"
+                    Activity(
+                        time="09:00",
+                        kind="transport",
+                        title=(
+                            f"乘 {transport.operator if transport else '交通'} "
+                            f"抵达 {city},入住酒店"
+                        ),
+                    )
                 )
         poi_list = per_day_pois[d - 1]
         for i, p in enumerate(poi_list):
-            when = "上午" if i % 2 == 0 else "下午"
             price = f"{p.ticket_price:.0f}元" if p.ticket_price is not None else "门票以现场为准"
             tag = "[多平台]" if p.verified else "[单平台]"
-            acts.append(f"{when} 游览 {p.name}{tag}({price},开放 {p.open_hours or '以官方为准'})")
+            time = "10:00-12:00" if i % 2 == 0 else "14:00-16:00"
+            acts.append(
+                Activity(
+                    time=time,
+                    kind="sight",
+                    title=f"游览 {p.name}{tag}({price},开放 {p.open_hours or '以官方为准'})",
+                    poi_name=p.name,
+                )
+            )
         if slow and poi_list:
-            acts.append("午后安排休息(带老人节奏放缓)")
+            acts.append(
+                Activity(time="12:00-14:00", kind="rest", title="午后安排休息(带老人节奏放缓)")
+            )
         if d == days_n:
-            acts.append("整理返程,预留机动时间")
+            acts.append(Activity(time="18:00", kind="note", title="整理返程,预留机动时间"))
         if d == 1 and not poi_list:
-            acts.append("入住后附近轻松逛逛")
+            acts.append(Activity(time="15:00", kind="sight", title="入住后附近轻松逛逛"))
         if days_n == 1:
             title = "单日往返"
         elif d == 1:
@@ -505,7 +677,7 @@ def _demo_days(
             ItineraryDay(
                 day=d,
                 title=title,
-                activities=acts or ["自由活动"],
+                activities=acts or [Activity(title="自由活动")],
             )
         )
     return days

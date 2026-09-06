@@ -14,8 +14,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from app import costing, llm, model_runtime, poi
-from app.models import PlanResponse
+from app import costing, llm, model_runtime, poi, sessions
+from app.models import CostBreakdown, PlanResponse, Poi, ResultBundle, TripRequest
 from app.retrieval import search_all
 from app.store import record_snapshot
 from app.suppliers import resolve_suppliers
@@ -32,6 +32,13 @@ class PlanRequest(BaseModel):
     )
 
 
+class RefineRequest(BaseModel):
+    feedback: str = Field(description="对上一版计划的追问,如:预算降到2000 / 第二天轻松点")
+    web_research: bool | None = Field(
+        default=None, description="覆盖 WEB_RESEARCH_ENABLED;true 时对该次细化启用实时网页检索"
+    )
+
+
 class ModelConfigRequest(BaseModel):
     api_key: str | None = Field(default=None, description="API Key;空串表示清除")
     base_url: str | None = Field(default=None, description="自定义端点(如网关/代理);空串清除")
@@ -40,8 +47,13 @@ class ModelConfigRequest(BaseModel):
     plan_model: str | None = Field(default=None, description="逐日规划模型;空串恢复默认")
 
 
-def _run_plan(text: str, web_research: bool | None = None) -> PlanResponse:
-    request = llm.parse_intent(text)
+def _search_and_plan(
+    request: TripRequest,
+    web_research: bool | None = None,
+    bundle: ResultBundle | None = None,
+    pois_list: list[Poi] | None = None,
+) -> tuple[PlanResponse, ResultBundle, list[Poi], CostBreakdown, str]:
+    """给定约束,检索(或复用候选)并产出计划;返回 (plan, bundle, pois, cost, live)。"""
     if not request.origin or not request.destinations:
         raise HTTPException(
             status_code=422,
@@ -52,24 +64,38 @@ def _run_plan(text: str, web_research: bool | None = None) -> PlanResponse:
             },
         )
 
-    # 交通/酒店(确定性并发) → 快照
-    bundle = search_all(request, resolve_suppliers())
-    if request.local_tour:
-        bundle.transport = []  # 周边自驾:无城际交通
-    rows = record_snapshot(request, bundle)
+    rows = 0
+    if bundle is None:
+        bundle = search_all(request, resolve_suppliers())
+        if request.local_tour:
+            bundle.transport = []
+        rows = record_snapshot(request, bundle)
 
-    # 多平台交叉景点
-    city = request.destinations[0]
-    keywords = poi.keywords_for(request.preferences)
-    providers = poi.resolve_poi_providers()
-    pois_list = poi.search_pois(city, keywords, providers)
+    if pois_list is None:
+        city = request.destinations[0]
+        keywords = poi.keywords_for(request.preferences)
+        providers = poi.resolve_poi_providers()
+        pois_list = poi.search_pois(city, keywords, providers)
 
-    # 确定性费用 → 实时资讯(可选) → 逐日规划
     cost = costing.estimate_cost(request, bundle, pois_list)
     live = llm.gather_live_info(pois_list, enabled=web_research)
     plan = llm.build_plan(request, bundle, pois_list, cost, live)
     plan.recorded_snapshot = rows > 0
-    return plan
+    return plan, bundle, pois_list, cost, live
+
+
+def _transport_changed(a: TripRequest, b: TripRequest) -> bool:
+    return (
+        a.origin, a.destinations, a.start_date, a.days,
+        a.adults, a.elders, a.children,
+    ) != (
+        b.origin, b.destinations, b.start_date, b.days,
+        b.adults, b.elders, b.children,
+    )
+
+
+def _poi_changed(a: TripRequest, b: TripRequest) -> bool:
+    return a.destinations != b.destinations or a.preferences != b.preferences
 
 
 @app.get("/healthz")
@@ -132,11 +158,58 @@ def test_model_config() -> dict:
 @app.post("/api/plan", response_model=PlanResponse)
 def plan(body: PlanRequest) -> PlanResponse:
     try:
-        return _run_plan(body.text, body.web_research)
+        request = llm.parse_intent(body.text)
+        plan, bundle, pois_list, cost, live = _search_and_plan(request, body.web_research)
+        state = sessions.PlanState(
+            request=request, bundle=bundle, pois=pois_list, cost=cost, plan=plan, live_info=live
+        )
+        sessions.create(state)  # 内部把 session_id 回填到 plan
+        return plan
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - 统一转 500,避免泄露堆栈
         raise HTTPException(status_code=500, detail=f"规划失败: {exc}") from exc
+
+
+@app.post("/api/plan/{session_id}/refine", response_model=PlanResponse)
+def refine(session_id: str, body: RefineRequest) -> PlanResponse:
+    """在既有会话的基础上按反馈更新计划;约束变了会重新检索与重算。"""
+    state = sessions.get(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="会话不存在或已过期。")
+    try:
+        new_request = llm.parse_feedback(state.request, body.feedback)
+        bundle = None if _transport_changed(state.request, new_request) else state.bundle
+        pois_list = None if _poi_changed(state.request, new_request) else state.pois
+        plan, bundle, pois_list, cost, live = _search_and_plan(
+            new_request, body.web_research, bundle=bundle, pois_list=pois_list
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"细化失败: {exc}") from exc
+
+    plan.session_id = session_id
+    state.request = new_request
+    state.bundle = bundle
+    state.pois = pois_list
+    state.cost = cost
+    state.live_info = live
+    state.plan = plan
+    state.history.append({"feedback": body.feedback, "note": plan.note})
+    sessions.update(session_id, state)
+    return plan
+
+
+@app.get("/api/plan/{session_id}", response_model=PlanResponse)
+def get_plan(session_id: str) -> PlanResponse:
+    """回放会话当前状态,供前端刷新恢复。"""
+    state = sessions.get(session_id)
+    if state is None or state.plan is None:
+        raise HTTPException(status_code=404, detail="会话不存在或尚未生成计划。")
+    plan = state.plan
+    plan.session_id = session_id
+    return plan
 
 
 @app.get("/", include_in_schema=False)

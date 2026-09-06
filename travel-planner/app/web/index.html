@@ -77,6 +77,15 @@
   .activity-poi .mini-thumb { width: 32px; height: 24px; object-fit: cover; border-radius: 3px;
                                background: var(--img-placeholder); }
 
+  /* Structured activity timeline */
+  .act-list { list-style: none; margin: 4px 0; padding: 0; }
+  .act { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 2px 0; }
+  .act-time { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .8rem;
+              color: var(--muted); min-width: 78px; }
+  .act-kind { display: inline-block; border-radius: 4px; padding: 0 6px; font-size: .72rem;
+              background: var(--day-bg); color: var(--muted); }
+  .act-note { font-size: .8rem; color: var(--muted); width: 100%; padding-left: 86px; }
+
   /* Scrollable POI table container */
   .table-scroll { overflow-x: auto; }
 
@@ -146,6 +155,13 @@
   </div>
   <div id="err" class="err" hidden></div>
 
+  <div id="refine-wrap" hidden>
+    <p><label for="feedback">继续完善(追问):</label></p>
+    <textarea id="feedback" placeholder="例:预算降到2000 / 第二天轻松点 / 改成5天 / 加一个亲子景点"></textarea>
+    <p style="margin-top:8px"><button id="refine_go">更新计划</button></p>
+    <div id="history" class="muted" style="margin-top:8px"></div>
+  </div>
+
   <!-- Image lightbox -->
   <div id="lightbox" onclick="this.classList.remove('show')">
     <img id="lightbox-img" src="" alt="" />
@@ -168,10 +184,17 @@ $('#go').onclick = async () => {
     if (!r.ok) throw new Error(typeof data.detail==='string' ? data.detail : JSON.stringify(data.detail));
   } catch (e) { err.textContent = '请求失败:' + e.message; err.hidden = false; return; }
   render(data);
+  _sessionId = data.session_id || null;
+  _history = [];
+  $('#refine-wrap').hidden = !_sessionId;
+  renderHistory();
 };
 
 /* ---- POI -> map lookup for activity enrichment ---- */
 let _poiMap = {};
+let _sessionId = null;
+let _history = [];
+const KIND_LABEL = { transport:'交通', meal:'餐饮', sight:'景点', hotel:'住宿', rest:'休息', note:'备注' };
 function buildPoiMap(pois) {
   _poiMap = {};
   (pois||[]).forEach(p => { _poiMap[p.name] = p; });
@@ -275,14 +298,22 @@ function render(d) {
   /* ---- Days with enriched POI images/links ---- */
   const daysHtml = (d.days||[]).map(x => {
     const acts = (x.activities||[]).map(a => {
-      const poi = findPoiInText(a);
-      if (!poi) return `<li>${escapeHtml(a)}</li>`;
-      const thumb = thumbHtml(poi.image_url, poi.name, 32);
-      const link = poi.url ? ` <a href="${escapeHtml(poi.url)}" target="_blank" rel="noopener" style="font-size:.8rem">[地图]</a>` : '';
-      return `<li><span class="activity-poi">${thumb} ${escapeHtml(a)}${link}</span></li>`;
+      const isStr = typeof a === 'string';
+      const title = isStr ? a : (a.title || '');
+      const time = (!isStr && a.time) ? `<span class="act-time">${escapeHtml(a.time)}</span>` : '';
+      const kind = isStr ? '' : `<span class="act-kind">${KIND_LABEL[a.kind] || '活动'}</span>`;
+      const poi = ((!isStr && a.poi_name && _poiMap[a.poi_name])) || findPoiInText(title);
+      let body = escapeHtml(title);
+      if (poi) {
+        const thumb = thumbHtml(poi.image_url, poi.name, 32);
+        const link = poi.url ? ` <a href="${escapeHtml(poi.url)}" target="_blank" rel="noopener" style="font-size:.8rem">[地图]</a>` : '';
+        body = `<span class="activity-poi">${thumb} ${body}${link}</span>`;
+      }
+      const note = (!isStr && a.note) ? `<div class="act-note">${escapeHtml(a.note)}</div>` : '';
+      return `<li class="act">${time} ${kind} ${body}${note}</li>`;
     }).join('');
     return `<div class="card day"><b>Day ${x.day} · ${escapeHtml(x.title)}</b>`
-    + `<ul>${acts}</ul>`
+    + `<ul class="act-list">${acts}</ul>`
     + (x.lodging_note?`<div class="muted">${escapeHtml(x.lodging_note)}</div>`:'') + `</div>`;
   }).join('');
   $('#days').innerHTML = `<b>逐日行程</b>` + (daysHtml || '<div class="muted">无</div>');
@@ -321,6 +352,34 @@ function render(d) {
   $('#out').hidden = false;
   $('#out').scrollIntoView({behavior:'smooth'});
 }
+
+function renderHistory() {
+  const box = $('#history');
+  if (!_history.length) { box.innerHTML = ''; return; }
+  box.innerHTML = _history.map((h, i) =>
+    `<div>#${i+1} 「${escapeHtml(h.feedback)}」 → ${escapeHtml(String(h.note||'').slice(0,80))}</div>`
+  ).join('');
+}
+
+$('#refine_go').onclick = async () => {
+  const err = $('#err');
+  err.hidden = true;
+  const feedback = $('#feedback').value.trim();
+  if (!feedback) { err.textContent = '请先输入追问内容。'; err.hidden = false; return; }
+  if (!_sessionId) { err.textContent = '尚未生成计划,无法继续完善。'; err.hidden = false; return; }
+  let data;
+  try {
+    const r = await fetch(`/api/plan/${_sessionId}/refine`, { method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({ feedback }) });
+    data = await r.json();
+    if (!r.ok) throw new Error(typeof data.detail==='string' ? data.detail : JSON.stringify(data.detail));
+  } catch (e) { err.textContent = '更新失败:' + e.message; err.hidden = false; return; }
+  _history.push({ feedback, note: data.note });
+  render(data);
+  _sessionId = data.session_id || _sessionId;
+  renderHistory();
+  $('#feedback').value = '';
+};
 
 /* ---- 模型配置 ---- */
 function setCfgStatus(t) { $('#cfg_status').textContent = t; }

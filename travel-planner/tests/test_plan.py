@@ -25,7 +25,7 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def _force_demo_mode(monkeypatch):
+def _force_demo_mode(monkeypatch, tmp_path):
     """保证走确定性演示模式,测试不依赖真实 LLM/POI 网络调用。"""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("TUNIU_API_KEY", raising=False)
@@ -37,6 +37,7 @@ def _force_demo_mode(monkeypatch):
     monkeypatch.delenv("PLANNER_PLAN_MODEL", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("PLANNER_DB_PATH", str(tmp_path / "test.db"))  # 隔离会话/快照写入
     model_runtime.reset()  # 忽略持久化文件,回到环境默认(未配置)
 
 
@@ -397,3 +398,67 @@ def test_clamp_start_date_rolls_past_forward():
     out = _clamp_start_date(req)
     assert out.start_date >= date.today()
     assert (out.start_date.month, out.start_date.day) == (9, 29)
+
+
+class TestSessions:
+    def test_session_roundtrip(self, monkeypatch, tmp_path):
+        from app import sessions
+
+        monkeypatch.setenv("PLANNER_DB_PATH", str(tmp_path / "s.db"))
+        req = TripRequest(origin="上海", destinations=["西安"], days=5)
+        bundle = search_all(req, [MockAdapter()])
+        state = sessions.PlanState(request=req, bundle=bundle)
+        sid = sessions.create(state)
+        assert state.plan is None or state.plan.session_id is None
+        got = sessions.get(sid)
+        assert got is not None
+        assert got.request.origin == "上海"
+        assert got.bundle.transport
+
+
+class TestRefine:
+    def test_plan_returns_session_id(self):
+        resp = client.post("/api/plan", json={"text": "上海出发带老人去西安5天人均3000偏人文"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["session_id"]
+
+    def test_refine_changes_budget_over(self):
+        first = client.post(
+            "/api/plan", json={"text": "上海出发带老人去西安5天人均3000偏人文"}
+        ).json()
+        sid = first["session_id"]
+        resp = client.post(f"/api/plan/{sid}/refine", json={"feedback": "预算降到100"})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["session_id"] == sid
+        assert body["budget_status"] == "over_budget"
+
+    def test_refine_changes_days(self):
+        first = client.post(
+            "/api/plan", json={"text": "上海出发带老人去西安5天人均3000偏人文"}
+        ).json()
+        sid = first["session_id"]
+        body = client.post(f"/api/plan/{sid}/refine", json={"feedback": "改成7天"}).json()
+        assert len(body["days"]) == 7
+
+    def test_refine_unknown_session_404(self):
+        resp = client.post("/api/plan/nonexistent/refine", json={"feedback": "x"})
+        assert resp.status_code == 404
+
+    def test_get_session_returns_plan(self):
+        first = client.post(
+            "/api/plan", json={"text": "上海出发带老人去西安5天人均3000偏人文"}
+        ).json()
+        sid = first["session_id"]
+        resp = client.get(f"/api/plan/{sid}")
+        assert resp.status_code == 200
+        assert resp.json()["session_id"] == sid
+
+    def test_structured_activities(self):
+        body = client.post(
+            "/api/plan", json={"text": "上海出发带老人去西安5天人均3000偏人文"}
+        ).json()
+        for day in body["days"]:
+            for a in day["activities"]:
+                assert "title" in a
+                assert isinstance(a["kind"], str)
