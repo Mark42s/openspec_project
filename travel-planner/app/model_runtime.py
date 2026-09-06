@@ -36,7 +36,7 @@ def _path() -> Path:
 def _env_defaults() -> dict:
     return {
         "api_key": os.getenv("ANTHROPIC_API_KEY", "").strip() or None,
-        "base_url": os.getenv("ANTHROPIC_BASE_URL", "").strip() or None,
+        "base_url": None,  # 页面/文件专属;env 的 ANTHROPIC_BASE_URL 由 anthropic_base_url() 读取
         "provider": os.getenv("PLANNER_PROVIDER", "").strip() or None,
         "parse_model": os.getenv("PLANNER_PARSE_MODEL", "").strip() or None,
         "plan_model": os.getenv("PLANNER_PLAN_MODEL", "").strip() or None,
@@ -84,6 +84,22 @@ def api_key() -> str | None:
 def base_url() -> str | None:
     _ensure_loaded()
     return _state["base_url"]
+
+
+def anthropic_base_url() -> str | None:
+    """Anthropic 供应商的 base_url:页面/文件 > ANTHROPIC_BASE_URL 环境变量。"""
+    return base_url() or os.getenv("ANTHROPIC_BASE_URL", "").strip() or None
+
+
+def effective_base_url() -> str:
+    """OpenAI 兼容供应商的 API base(页面/文件 > OPENAI_BASE_URL > DeepSeek 默认)。
+
+    不能用 ANTHROPIC_BASE_URL:那是 Anthropic 代理,不是 OpenAI 兼容服务。
+    并把网页控制台 platform.deepseek.com 纠正为 api.deepseek.com(其对 /chat/completions 返 429)。
+    """
+    base = base_url() or os.getenv("OPENAI_BASE_URL", "").strip() or "https://api.deepseek.com"
+    base = base.rstrip("/")
+    return base.replace("platform.deepseek.com", "api.deepseek.com")
 
 
 def provider() -> str:

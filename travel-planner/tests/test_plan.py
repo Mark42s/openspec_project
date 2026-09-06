@@ -32,6 +32,8 @@ def _force_demo_mode(monkeypatch):
     monkeypatch.delenv("PLANNER_PROVIDER", raising=False)
     monkeypatch.delenv("PLANNER_PARSE_MODEL", raising=False)
     monkeypatch.delenv("PLANNER_PLAN_MODEL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     model_runtime.reset()  # 忽略持久化文件,回到环境默认(未配置)
 
 
@@ -287,3 +289,13 @@ class TestModelConfig:
         model_runtime.set_config(api_key="sk-test", provider="openai")
         pois = [Poi(name="测试景点", sources=["mock"])]
         assert llm.gather_live_info(pois, enabled=True) == ""
+
+    def test_effective_base_url_normalizes_platform(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MODEL_CONFIG_PATH", str(tmp_path / "mc.json"))
+        model_runtime.reset()
+        # 未配置 base_url → 默认 api.deepseek.com
+        model_runtime.set_config(api_key="sk-test", provider="openai")
+        assert model_runtime.effective_base_url() == "https://api.deepseek.com"
+        # 误填网页控制台 → 纠正为 api.deepseek.com
+        model_runtime.set_config(base_url="https://platform.deepseek.com")
+        assert model_runtime.effective_base_url() == "https://api.deepseek.com"

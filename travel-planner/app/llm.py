@@ -74,7 +74,7 @@ def _client() -> anthropic.Anthropic:
     key = rt.api_key()
     if key:
         kwargs["api_key"] = key
-    base = rt.base_url()
+    base = rt.anthropic_base_url()
     if base:
         kwargs["base_url"] = base
     return anthropic.Anthropic(**kwargs)
@@ -100,7 +100,7 @@ _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 def _openai_parse(prompt: str, output_model: type[_ModelT], model: str) -> _ModelT:
     """OpenAI 兼容(DeepSeek)JSON 模式:POST /chat/completions → pydantic 校验。"""
-    base = (rt.base_url() or "https://api.deepseek.com").rstrip("/")
+    base = rt.effective_base_url()
     key = rt.api_key()
     schema = output_model.model_json_schema()
     full_prompt = (

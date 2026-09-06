@@ -108,7 +108,7 @@ def test_model_config() -> dict:
         raise HTTPException(status_code=400, detail="请先填写并保存 API Key 再测试。")
     try:
         if model_runtime.provider() == "openai":
-            base = (model_runtime.base_url() or "https://api.deepseek.com").rstrip("/")
+            base = model_runtime.effective_base_url()
             resp = httpx.get(
                 f"{base}/models",
                 headers={"Authorization": f"Bearer {model_runtime.api_key()}"},
@@ -118,7 +118,7 @@ def test_model_config() -> dict:
                 raise RuntimeError(f"{resp.status_code} {resp.text[:300]}")
             return {"ok": True, "model": model_runtime.plan_model()}
         kwargs: dict = {"api_key": model_runtime.api_key()}
-        base = model_runtime.base_url()
+        base = model_runtime.anthropic_base_url()
         if base:
             kwargs["base_url"] = base
         model = anthropic.Anthropic(**kwargs).models.retrieve(
