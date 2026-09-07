@@ -28,18 +28,18 @@ def _seed(*parts: object) -> int:
     return int(hashlib.sha256(raw).hexdigest()[:8], 16)
 
 
-# 目的地 → 常见高铁运营商的稳定映射表(仅演示用)
+# 目的地 → 常见高铁运营商的稳定映射表(仅演示用;编号加 MOCK 前缀以示非真实车次)
 _TRAIN_OPERATORS = {
-    "西安": ["G1920", "G360", "G872"],
-    "北京": ["G8", "G6", "G24"],
-    "杭州": ["G7303", "G7501", "G7351"],
-    "成都": ["G3286", "G2193", "G2831"],
-    "广州": ["G1301", "G817", "G1007"],
+    "西安": ["Mock-西沪高铁", "Mock-西沪动车", "Mock-西沪直达"],
+    "北京": ["Mock-京沪高铁", "Mock-京沪动车", "Mock-京沪直达"],
+    "杭州": ["Mock-沪杭高铁", "Mock-沪杭动车", "Mock-沪杭直达"],
+    "成都": ["Mock-成沪高铁", "Mock-成沪动车", "Mock-成沪直达"],
+    "广州": ["Mock-广沪高铁", "Mock-广沪动车", "Mock-广沪直达"],
 }
 
 
 def _ops(dest: str) -> list[str]:
-    return _TRAIN_OPERATORS.get(dest, ["G1000", "G1001", "G1002"])
+    return _TRAIN_OPERATORS.get(dest, [f"Mock-{dest}方向高铁", f"Mock-{dest}方向动车", f"Mock-{dest}方向直达"])
 
 
 class MockAdapter(SupplierAdapter):
@@ -67,7 +67,7 @@ class MockAdapter(SupplierAdapter):
                 mode="flight",
                 from_city=query.origin,
                 to_city=dest,
-                operator=f"MU{(1000 + base % 9000)}",
+                operator=f"Mock-航班MU{(1000 + base % 9000)}",
                 departure_time=f"{8 + (base % 11):02d}:15",
                 arrival_time=f"{10 + (base % 10):02d}:50",
                 price=480.0 + (base % 600),  # 经济舱

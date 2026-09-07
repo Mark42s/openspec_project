@@ -362,11 +362,27 @@ def _assemble_plan(
 ) -> PlanResponse:
     """把模型的 ItineraryPlan 与确定性费用/来源合并为最终响应(build_plan 与 refine_plan 共用)。"""
     over = request.per_person_budget is not None and cost.per_person > request.per_person_budget
+
+    # 修正:用 bundle 的真实数据覆盖 LLM 编造的交通标签(车次号等)
+    recommendations = list(p.recommendations)
+    for r in recommendations:
+        if r.kind == "transport" and bundle.transport:
+            q = min(bundle.transport, key=lambda t: t.price)
+            mode_label = "高铁" if q.mode == "train" else "航班"
+            r.label = (
+                f"{mode_label} {q.operator} "
+                f"{q.from_city}→{q.to_city} "
+                f"{q.departure_time}-{q.arrival_time}"
+            )
+        elif r.kind == "hotel" and bundle.hotels:
+            h = bundle.hotels[len(bundle.hotels) // 2]
+            r.label = f"{h.city} {h.name} · {h.room_type}"
+
     return PlanResponse(
         request_summary=p.request_summary,
         budget_status="over_budget" if over else "ok",
         note=p.note,
-        recommendations=p.recommendations,
+        recommendations=recommendations,
         days=p.days,
         pois=pois,
         cost_breakdown=cost,
