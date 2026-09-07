@@ -201,6 +201,87 @@ class TestLocalTour:
         assert body["pois"]
 
 
+class TestTransportFixed:
+    """用户已自行安排跨城交通(已购机票/已定航班)时,不得再推荐/安排交通。"""
+
+    def test_parse_transport_fixed_heuristic(self):
+        req = llm.parse_intent("无锡出发坐飞机去贵州7天,机票已买好")
+        assert req.transport_fixed is True
+        # 仅说坐飞机、未说已买票 → 不算固定
+        req2 = llm.parse_intent("无锡出发坐飞机去贵州7天")
+        assert req2.transport_fixed is False
+
+    def test_parse_fixed_cost_from_feedback(self):
+        req = llm.parse_feedback(
+            TripRequest(origin="无锡", destinations=["贵州"], days=7),
+            "我是要坐飞机去,两个人价格是4400,不用再计算了",
+        )
+        assert req.transport_fixed is True
+        assert req.fixed_transport_cost == 4400.0
+
+    def test_transport_fixed_no_transport_in_plan(self):
+        resp = client.post(
+            "/api/plan",
+            json={"text": "无锡出发去贵阳7天,航班已订好,两个人机票4400不用算了"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # 推荐里没有比价型交通方案;若有也是「已自订」占位,不含真实车次
+        for r in body["recommendations"]:
+            if r["kind"] == "transport":
+                assert r["supplier"] == "自行安排"
+                assert r["price"] == 4400.0
+        # 费用把 4400 计入
+        assert body["cost_breakdown"]["transport"] == 4400.0
+        # 首日不写「乘 Mock…抵达」
+        first = body["days"][0]["activities"][0]
+        assert "按已定的交通" in first["title"] or "已定" in first["title"]
+
+    def test_transport_fixed_without_cost_zero_transport(self):
+        resp = client.post(
+            "/api/plan", json={"text": "无锡出发去贵阳7天,我已经买了机票不用安排交通"}
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["cost_breakdown"]["transport"] == 0.0
+        assert all(r["kind"] != "transport" for r in body["recommendations"])
+
+    def test_refine_applies_transport_fixed(self):
+        """先出普通计划,再反馈「坐飞机不用算交通」→ 新计划不再推荐交通。"""
+        first = client.post(
+            "/api/plan", json={"text": "上海出发去西安5天人均3000偏人文"}
+        ).json()
+        sid = first["session_id"]
+        resp = client.post(
+            f"/api/plan/{sid}/refine",
+            json={"feedback": "我是坐飞机去的,机票已买,往返4400不用再算交通"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["cost_breakdown"]["transport"] == 4400.0
+        for r in body["recommendations"]:
+            if r["kind"] == "transport":
+                assert "Mock" not in r["label"]  # 不再是比价推荐
+
+    def test_refine_extracts_cost_with_long_separator(self):
+        """真实句式:金额与「机票」之间隔了较长的修饰短语,也应提取到总价。"""
+        first = client.post(
+            "/api/plan", json={"text": "无锡出发去贵阳7天"}
+        ).json()
+        sid = first["session_id"]
+        resp = client.post(
+            f"/api/plan/{sid}/refine",
+            json={"feedback": "我机票已经买好了,两个人4400,不用再算了"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["cost_breakdown"]["transport"] == 4400.0
+        # 交通推荐退化为「已自订」占位而非比价方案
+        transports = [r for r in body["recommendations"] if r["kind"] == "transport"]
+        assert transports and transports[0]["supplier"] == "自行安排"
+        assert "按已定的交通" in body["days"][0]["activities"][0]["title"]
+
+
 class TestModelConfig:
     def test_config_endpoints_roundtrip(self, monkeypatch, tmp_path):
         monkeypatch.setenv("MODEL_CONFIG_PATH", str(tmp_path / "mc.json"))

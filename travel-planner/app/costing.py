@@ -25,7 +25,11 @@ def estimate_cost(
     nights = max(days - 1, 0) if nights is None else nights
     travelers = max(1, request.adults + request.elders + request.children)
 
-    transport = _min_price(bundle.transport, "price") * 2  # 最低往返
+    if request.transport_fixed:
+        # 交通已自行安排:用用户告知的固定总价(如「两个人机票4400」),未告知则不计
+        transport = float(request.fixed_transport_cost or 0.0)
+    else:
+        transport = _min_price(bundle.transport, "price") * 2  # 最低往返
     hotel_nightly = _min_price(bundle.hotels, "price_per_night")
     hotels = hotel_nightly * nights
     tickets = sum(p.ticket_price for p in pois if p.ticket_price is not None)

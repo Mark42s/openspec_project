@@ -20,6 +20,10 @@ import anthropic
 import httpx
 from pydantic import BaseModel, Field
 
+# 某些安装环境(如 MSYS 平台的旧包)缺 APIError 属性;兜底为 Exception,
+# 保证 SDK 错误能被统一转成 RuntimeError 而不是二次抛 AttributeError。
+_ANTHROPIC_ERROR = getattr(anthropic, "APIError", Exception)
+
 from app import model_runtime as rt
 from app.models import (
     Activity,
@@ -61,6 +65,28 @@ _PREF_TRIGGERS = {
     "购物": ["购物", "逛街"],
 }
 _LOCAL_HINTS = re.compile(r"周边|附近|自驾|周边游|省内|近郊|开车去")
+# 「交通已自行安排」识别:已购票/已定航班/要求不算交通
+_TRANSPORT_FIXED_HINTS = re.compile(
+    r"已(?:经)?(?:买|购|订)(?:好|到|了)?(?:了)?(?:机票|高铁票|动车票|火车票|票|航班)"
+    r"|(?:机票|航班|往返票|高铁票)(?:已经|已)?(?:买|订|定)"
+    r"|不用(?:再)?(?:算|安排|考虑|管|推荐)[^。]{0,4}(?:交通|出行|机票|车票)?"
+    r"|交通(?:已经|已)?(?:安排|订|买)好|出行(?:已经|已)?(?:安排|订)好"
+    r"|坐飞机去[^。]{0,30}(?:不用|已(?:经)?(?:买|订)|价格是|花费是)"
+)
+# 固定交通金额识别:如「两个人机票 4400」「机票已经买好了,两个人 4400」
+_FIXED_COST_PATTERN = re.compile(
+    r"(?:机票|航班|往返|交通|飞机)[^0-9]{0,15}(\d{3,6})(?:\.\d+)?\s*元?"
+    r"|(\d{3,6})\s*元[^0-9]{0,12}(?:机票|航班|往返)"
+)
+
+
+def _parse_fixed_cost(text: str) -> float | None:
+    """从文本里提取用户告知的往返交通总价;多个匹配取第一个。"""
+    m = _FIXED_COST_PATTERN.search(text)
+    if not m:
+        return None
+    raw = next((g for g in m.groups() if g), None)
+    return float(raw) if raw else None
 
 
 def configured() -> bool:
@@ -146,6 +172,10 @@ def parse_intent(text: str) -> TripRequest:
         "并把该字段名加入 missing_fields;目的地可有多个候选,按文本偏好排序。\n"
         "若用户未指明具体目的地但提到 周边/自驾/附近/省内 等,"
         "把 destinations 设为 [出发地] 并把 local_tour 置为 true,不要加入 missing_fields。\n"
+        "跨城交通已自行安排(用户已买/已订机票或高铁票、给出航班时刻往返、或说交通不用再算/不用安排/"
+        "出行已搞定)时:transport_fixed 置 true;若用户还明确给出往返交通总花费(如「两个人机票4400」),"
+        "把金额填入 fixed_transport_cost(元)。这些都不是缺失字段,不要加入 missing_fields。\n"
+        "「坐飞机去」或「坐高铁去」仅表示交通偏好、并未说已买票时,transport_fixed 保持 false。\n"
         "文本:\n" + text
     )
     if provider() == "openai":
@@ -159,9 +189,10 @@ def parse_intent(text: str) -> TripRequest:
                 output_format=TripRequest,
             )
             req = resp.parsed_output
-        except anthropic.APIError as exc:
+        except _ANTHROPIC_ERROR as exc:
             raise RuntimeError(f"意图解析调用失败: {exc}") from exc
-    return _clamp_start_date(req)
+    req = _clamp_start_date(req)
+    return _apply_transport_hints(text, req)
 
 
 def _clamp_start_date(req: TripRequest) -> TripRequest:
@@ -175,6 +206,19 @@ def _clamp_start_date(req: TripRequest) -> TripRequest:
         except ValueError:  # 2月29日 落在非闰年
             d = d.replace(year=d.year + 1, day=28)
     req.start_date = d
+    return req
+
+
+def _apply_transport_hints(text: str, req: TripRequest) -> TripRequest:
+    """确定性校验层:即使模型漏识别,只要原文含明确的「交通已自订」表达就强制置位。
+
+    这是与模型软约束互补的硬兜底——用户说出「机票已买/不用算交通」时必须生效。
+    """
+    if _TRANSPORT_FIXED_HINTS.search(text):
+        req.transport_fixed = True
+        cost = _parse_fixed_cost(text)
+        if cost is not None and req.fixed_transport_cost is None:
+            req.fixed_transport_cost = cost
     return req
 
 
@@ -202,6 +246,9 @@ def _heuristic_parse(text: str) -> TripRequest:
     m = re.search(r"(\d{1,2})\s*(?:天|日)", text)
     if m:
         req.days = int(m.group(1))
+
+    # 跨城交通已自行安排(确定性兜底)
+    req = _apply_transport_hints(text, req)
 
     m = re.search(r"人均\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(?:元)?", text)
     if m:
@@ -247,6 +294,9 @@ def parse_feedback(prior: TripRequest, feedback: str) -> TripRequest:
         "若该日期已过则按明年解析。\n"
         "规则:未在反馈中提及的字段保持原值;只在反馈明确要求时修改(如「预算降到2000」「改成5天」「去杭州」「带上孩子」)。"
         "若反馈只是调整行程(如「第二天轻松点」),约束保持不变、按原值输出。\n"
+        "反馈中若说跨城交通已买/已订(如「我坐飞机过去,票已买好」「航班9.29晚8点往返」「交通不用再算了」),"
+        "transport_fixed 置 true,并把给出的往返总花费(如「两个人4400」)填入 fixed_transport_cost;"
+        "若反馈未提及交通,transport_fixed/fixed_transport_cost 保持原值。\n"
         f"现有约束:\n{prior.model_dump(mode='json', exclude={'missing_fields'})}\n"
         f"用户反馈:\n{feedback}"
     )
@@ -261,9 +311,10 @@ def parse_feedback(prior: TripRequest, feedback: str) -> TripRequest:
                 output_format=TripRequest,
             )
             req = resp.parsed_output
-        except anthropic.APIError as exc:
+        except _ANTHROPIC_ERROR as exc:
             raise RuntimeError(f"追问解析调用失败: {exc}") from exc
-    return _clamp_start_date(req)
+    req = _clamp_start_date(req)
+    return _apply_transport_hints(feedback, req)
 
 
 def _merge_feedback_heuristic(prior: TripRequest, feedback: str) -> TripRequest:
@@ -295,6 +346,9 @@ def _merge_feedback_heuristic(prior: TripRequest, feedback: str) -> TripRequest:
         req.elders = max(req.elders, 1)
     if re.search(r"亲子|带娃|小孩|孩子", feedback):
         req.children = max(req.children, 1)
+
+    # 交通已自行安排(确定性兜底:只在反馈明确提及时改;否则 model_copy 保留原值)
+    req = _apply_transport_hints(feedback, req)
 
     _mark_missing(req)
     return req
@@ -330,6 +384,8 @@ def build_plan(
         "5) activities 用结构化时段:每项含 time(如 '09:00-11:30')、title(内容)、"
         "kind(transport/meal/sight/hotel/rest/note 之一)、poi_name(对应景点名,无则留空);"
         "首日含抵达交通、末日含返程。\n"
+        "6) 若用户约束里 transport_fixed=true:交通已由用户自行安排,recoomendations 里不得出现跨城交通方案,"
+        "首日改为「按已定交通自行前往」、末日不排返程购票;若给了 fixed_transport_cost,费用由系统计入,勿重复估算。\n"
         f"用户约束:\n{request.model_dump(mode='json', exclude={'missing_fields'})}\n"
         f"交通/住宿候选:\n{block or '(无)'}\n"
         f"可安排景点:\n{poi_lines or '(无)'}\n"
@@ -346,7 +402,7 @@ def build_plan(
                 output_format=ItineraryPlan,
             )
             p = resp.parsed_output
-        except anthropic.APIError as exc:
+        except _ANTHROPIC_ERROR as exc:
             raise RuntimeError(f"逐日规划调用失败: {exc}") from exc
 
     return _assemble_plan(request, bundle, pois, cost, p, live_info)
@@ -377,6 +433,24 @@ def _assemble_plan(
         elif r.kind == "hotel" and bundle.hotels:
             h = bundle.hotels[len(bundle.hotels) // 2]
             r.label = f"{h.city} {h.name} · {h.room_type}"
+
+    if request.transport_fixed:
+        # 交通已自行安排:去掉模型推荐的跨城交通,换成用户告知的固定交通条目
+        recommendations = [r for r in recommendations if r.kind != "transport"]
+        if request.fixed_transport_cost is not None:
+            recommendations.insert(
+                0,
+                PlanRecommendation(
+                    kind="transport",
+                    label=(
+                        f"已自订往返交通 "
+                        f"{request.origin or ''}→{request.destinations[0] if request.destinations else ''}"
+                    ),
+                    supplier="自行安排",
+                    price=request.fixed_transport_cost,
+                    reason="按你告知的往返交通费用计入,未再检索比价。",
+                ),
+            )
 
     return PlanResponse(
         request_summary=p.request_summary,
@@ -421,12 +495,16 @@ def refine_plan(
     prompt = (
         "你是旅游规划师。用户对上一版行程提出了反馈,请在其基础上更新出新的逐日行程。\n"
         "规则:\n"
-        "1) 尊重反馈:能改的改、不能改的说明;不要丢弃用户此前满意的部分,除非反馈要求;\n"
+        "1) 尊重反馈:能改的改、不能改的说明;不要丢弃用户此前满意的部分,除非反馈要求;"
+        "反馈中用户点名已定/已订/固定/不要动/不变的内容(某天、某段或交通),新行程必须原样保留,"
+        "并在 note 里明确说明本次保留了什么、调整了什么。\n"
         "2) days 数组长度=行程天数;首日为抵达+入住,末日宽松并留返程;\n"
         "3) 每日 2-3 个景点,带老人/慢节奏每日最多 2 点并安排午休;亲子留亲子友好时段;\n"
         "4) 费用请勿自行估算(系统会确定性计算);note 写中文权衡与提醒,并说明本次改了什么;\n"
         "5) activities 用结构化时段:每项含 time(如 '09:00-11:30')、title、"
-        "kind(transport/meal/sight/hotel/rest/note)、poi_name(对应景点名,无则留空)。\n"
+        "kind(transport/meal/sight/hotel/rest/note)、poi_name(对应景点名,无则留空);\n"
+        "6) 若用户约束里 transport_fixed=true:跨城交通已由用户自行安排(如已购机票),"
+        "不得推荐任何跨城交通方案,首日改为按已定交通自行前往,末日不排返程购票。\n"
         f"用户约束:\n{request.model_dump(mode='json', exclude={'missing_fields'})}\n"
         f"上一版逐日行程:\n{prior_days or '(无)'}\n"
         f"用户反馈:\n{feedback}\n"
@@ -445,7 +523,7 @@ def refine_plan(
                 output_format=ItineraryPlan,
             )
             p = resp.parsed_output
-        except anthropic.APIError as exc:
+        except _ANTHROPIC_ERROR as exc:
             raise RuntimeError(f"细化规划调用失败: {exc}") from exc
 
     return _assemble_plan(request, bundle, pois, cost, p, live_info)
@@ -556,6 +634,20 @@ def _build_plan_demo(
                 ),
             )
         )
+    elif request.transport_fixed and request.fixed_transport_cost is not None:
+        # 交通已自行安排且用户给了总价:展示为已定条目而非推荐
+        recommendations.append(
+            PlanRecommendation(
+                kind="transport",
+                label=(
+                    f"已自订往返交通 "
+                    f"{request.origin or ''}→{request.destinations[0] if request.destinations else ''}"
+                ),
+                supplier="自行安排",
+                price=request.fixed_transport_cost,
+                reason="按你告知的往返交通费用计入,未再检索比价。",
+            )
+        )
     if hotel:
         recommendations.append(
             PlanRecommendation(
@@ -587,6 +679,13 @@ def _build_plan_demo(
         note_parts.append(f"检索到 {len(pois)} 个候选景点,其中 {verified} 个经多平台交叉确认。")
     if request.local_tour:
         note_parts.append("周边游模式:按本地自驾理解,未计入长途交通费用。")
+    if request.transport_fixed:
+        if request.fixed_transport_cost is not None:
+            note_parts.append(
+                f"往返交通已按你告知的 {request.fixed_transport_cost:.0f} 元计入,未再检索比价。"
+            )
+        else:
+            note_parts.append("跨城交通已由你自行安排,本计划未推荐/安排出行方案。")
     note_parts.append("以上为演示数据(mock),价格与实时性不保证,请以实际下单页为准。")
     if request.preferences:
         note_parts.append("已考虑偏好:" + "、".join(request.preferences) + "。")
@@ -647,6 +746,14 @@ def _demo_days(
                             f"{request.origin or '本地'} 自驾出发,"
                             f"入住 {city} 周边/市区酒店,不安排长途交通"
                         ),
+                    )
+                )
+            elif request.transport_fixed:
+                acts.append(
+                    Activity(
+                        time="09:00",
+                        kind="transport",
+                        title=f"按已定的交通前往 {city},抵达后入住酒店(不再推荐出行方案)",
                     )
                 )
             else:

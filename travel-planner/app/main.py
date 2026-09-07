@@ -66,7 +66,8 @@ def _search_and_plan(
 
     rows = 0
     if bundle is None:
-        bundle = search_all(request, resolve_suppliers())
+        skip_transport = request.transport_fixed or request.local_tour
+        bundle = search_all(request, resolve_suppliers(), skip_transport=skip_transport)
         if request.local_tour:
             bundle.transport = []
         rows = record_snapshot(request, bundle)
@@ -87,10 +88,12 @@ def _search_and_plan(
 def _transport_changed(a: TripRequest, b: TripRequest) -> bool:
     return (
         a.origin, a.destinations, a.start_date, a.days,
-        a.adults, a.elders, a.children,
+        a.adults, a.elders, a.children, a.local_tour,
+        a.transport_fixed, a.fixed_transport_cost,
     ) != (
         b.origin, b.destinations, b.start_date, b.days,
-        b.adults, b.elders, b.children,
+        b.adults, b.elders, b.children, b.local_tour,
+        b.transport_fixed, b.fixed_transport_cost,
     )
 
 

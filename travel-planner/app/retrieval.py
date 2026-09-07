@@ -31,8 +31,16 @@ class _HotelQuery:
         self.travelers = travelers
 
 
-def search_all(request: TripRequest, suppliers: list[SupplierAdapter]) -> ResultBundle:
-    """对主目的地并发检索交通与酒店,去重并初筛。"""
+def search_all(
+    request: TripRequest,
+    suppliers: list[SupplierAdapter],
+    *,
+    skip_transport: bool = False,
+) -> ResultBundle:
+    """对主目的地并发检索交通与酒店,去重并初筛。
+
+    skip_transport=True(交通已自行安排/周边游)时只查酒店,不浪费真实供应商调用。
+    """
     destination = request.destinations[0] if request.destinations else ""
     origin = request.origin or ""
     start = request.start_date or date.today()
@@ -46,9 +54,9 @@ def search_all(request: TripRequest, suppliers: list[SupplierAdapter]) -> Result
     all_hotels: list[HotelQuote] = []
     errors: list[str] = []
 
-    jobs: list[tuple[SupplierAdapter, str]] = [
-        (s, "transport") for s in suppliers
-    ] + [(s, "hotel") for s in suppliers]
+    jobs: list[tuple[SupplierAdapter, str]] = [(s, "hotel") for s in suppliers]
+    if not skip_transport:
+        jobs = [(s, "transport") for s in suppliers] + jobs
 
     with ThreadPoolExecutor(max_workers=max(4, len(jobs))) as pool:
         futures = {

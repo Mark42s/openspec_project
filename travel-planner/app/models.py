@@ -27,6 +27,15 @@ class TripRequest(BaseModel):
         default=False,
         description="周边游:用户未指明具体目的地,以出发地为游览中心(不安排城际交通)",
     )
+    transport_fixed: bool = Field(
+        default=False,
+        description="跨城交通已自行安排(已购机票/高铁票、航班时刻已定、要求不用再算交通),"
+        "系统不得再检索/推荐/安排跨城交通",
+    )
+    fixed_transport_cost: float | None = Field(
+        default=None,
+        description="用户明确告知的往返交通总费用(元),如「两个人机票4400」;有值则计入费用分解",
+    )
     missing_fields: list[str] = Field(default_factory=list, description="用户未提供、待确认的字段")
 
 
