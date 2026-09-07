@@ -422,7 +422,79 @@ class TestRefine:
         assert resp.status_code == 200, resp.text
         assert resp.json()["session_id"]
 
-    def test_refine_changes_budget_over(self):
+    def test_refine_history_contains_snapshot(self):
+        """refine 后 history 条目包含完整快照，可用于回退。"""
+        from app import sessions
+
+        first = client.post(
+            "/api/plan", json={"text": "上海出发带老人去西安5天人均3000偏人文"}
+        ).json()
+        sid = first["session_id"]
+        resp = client.post(f"/api/plan/{sid}/refine", json={"feedback": "预算降到100"})
+        assert resp.status_code == 200, resp.text
+        state = sessions.get(sid)
+        assert len(state.history) == 1
+        entry = state.history[0]
+        assert entry.feedback == "预算降到100"
+        assert entry.snapshot is not None
+        assert entry.snapshot["budget_status"] == "over_budget"
+        assert entry.snapshot["session_id"] == sid
+
+    def test_get_sessions_lists_all(self):
+        """GET /api/sessions 返回所有未过期会话。"""
+        client.post("/api/plan", json={"text": "上海去西安5天"})
+        resp = client.get("/api/sessions")
+        assert resp.status_code == 200
+        sessions = resp.json()
+        assert len(sessions) >= 1
+        s = sessions[0]
+        assert "session_id" in s
+        assert "request_summary" in s
+        assert "history_count" in s
+        assert "created_at" in s
+        assert "updated_at" in s
+
+    def test_session_expiry(self, monkeypatch, tmp_path):
+        """过期会话返回 404。"""
+        from datetime import datetime, timedelta, timezone
+        from app import sessions as sess
+
+        monkeypatch.setenv("PLANNER_DB_PATH", str(tmp_path / "e.db"))
+        req = TripRequest(origin="上海", destinations=["西安"], days=5)
+        bundle = search_all(req, [MockAdapter()])
+        state = sess.PlanState(request=req, bundle=bundle)
+        # 手动设为已过期
+        state.expires_at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+        sid = sess.create(state)
+        resp = client.get(f"/api/plan/{sid}")
+        assert resp.status_code == 404
+
+    def test_multi_refine_preserves_snapshots(self):
+        """多次 refine 后每个历史版本的快照都可用，可按版本回退。"""
+        from app import sessions
+
+        first = client.post(
+            "/api/plan", json={"text": "上海出发带老人去西安5天人均3000偏人文"}
+        ).json()
+        sid = first["session_id"]
+        # 第一次 refine: 预算降到 100
+        r1 = client.post(f"/api/plan/{sid}/refine", json={"feedback": "预算降到100"})
+        assert r1.status_code == 200
+        # 第二次 refine: 改成 7 天
+        r2 = client.post(f"/api/plan/{sid}/refine", json={"feedback": "改成7天"})
+        assert r2.status_code == 200
+        assert len(r2.json()["days"]) == 7
+
+        state = sessions.get(sid)
+        assert len(state.history) == 2
+        # 第 1 版快照：5 天、预算 100
+        snap1 = state.history[0].snapshot
+        assert snap1["budget_status"] == "over_budget"
+        # 第 2 版快照：7 天
+        snap2 = state.history[1].snapshot
+        assert len(snap2["days"]) == 7
+
+    def test_refine_unknown_session_404(self):
         first = client.post(
             "/api/plan", json={"text": "上海出发带老人去西安5天人均3000偏人文"}
         ).json()

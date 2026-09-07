@@ -99,102 +99,291 @@
               align-items: center; justify-content: center; z-index: 1000; cursor: pointer; }
   #lightbox.show { display: flex; }
   #lightbox img { max-width: 90vw; max-height: 90vh; border-radius: 8px; }
+
+  /* ===== Split Layout ===== */
+  #app { max-width: 1280px; margin: 0 auto; padding: 16px; }
+  #app-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  #app-header h1 { margin-bottom: 0; }
+
+  /* Input area transition */
+  #input-area { transition: opacity .2s; }
+  #input-area.collapsed { display: none; }
+
+  /* Split layout container */
+  #split-layout { display: flex; height: calc(100vh - 180px); min-height: 400px; margin-top: 12px; }
+  #split-layout[hidden] { display: none; }
+
+  .sidebar {
+    width: 280px; min-width: 280px; overflow-y: auto;
+    border-right: 1px solid var(--border); background: var(--card);
+    border-radius: 8px 0 0 8px; padding: 0;
+  }
+  .sidebar h3 { padding: 12px 16px 8px; margin: 0; font-size: .95rem; }
+
+  .main-content {
+    flex: 1; overflow-y: auto; display: flex; flex-direction: column; min-width: 0;
+  }
+  #plan-view { flex: 1; overflow-y: auto; padding-bottom: 8px; position: relative; }
+
+  /* Refine bar pinned to bottom */
+  .refine-bar {
+    border-top: 1px solid var(--border); padding: 12px 0;
+    display: flex; gap: 8px; align-items: flex-end;
+    background: var(--bg); position: sticky; bottom: 0; flex-shrink: 0;
+  }
+  .refine-bar textarea { flex: 1; min-height: 36px; max-height: 120px; resize: vertical; }
+  .refine-bar button { flex-shrink: 0; }
+  #refine-status { font-size: .8rem; color: var(--accent); white-space: nowrap; }
+
+  /* Session/Version items in sidebar */
+  .sidebar-item {
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    cursor: pointer; transition: background .15s;
+  }
+  .sidebar-item:hover { background: var(--day-bg); }
+  .sidebar-item.active { border-left: 3px solid var(--accent); background: var(--day-bg); }
+  .sidebar-item .item-title { font-size: .85rem; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sidebar-item .item-time { font-size: .75rem; color: var(--muted); margin-top: 2px; }
+  .sidebar-item .item-badge { font-size: .7rem; background: var(--day-bg); padding: 1px 6px; border-radius: 999px; }
+
+  /* Loading overlay */
+  .loading-overlay {
+    position: absolute; inset: 0; background: rgba(255,255,255,.6);
+    display: flex; align-items: center; justify-content: center; z-index: 10; border-radius: 8px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .loading-overlay { background: rgba(26,26,46,.75); }
+  }
+  :root[data-theme="dark"] .loading-overlay { background: rgba(26,26,46,.75); }
+  .loading-overlay .spinner { width: 32px; height: 32px; border-width: 3px; }
+
+  /* Diff badges */
+  .diff-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: .75rem; margin-right: 4px; }
+  .diff-added { background: var(--tag-ok-bg); color: var(--tag-ok); }
+  .diff-changed { background: var(--tag-warn-bg); color: var(--tag-warn); }
+
+  /* Button disabled */
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button:disabled:hover { background: var(--card); color: var(--text); border-color: var(--border); }
+
+  /* Responsive: stack on small screens */
+  @media (max-width: 768px) {
+    body { max-width: 100%; padding: 8px; }
+    #app { max-width: 100%; padding: 8px; }
+    #split-layout { flex-direction: column; height: auto; }
+    .sidebar {
+      width: 100%; min-width: unset; max-height: 200px;
+      border-right: none; border-bottom: 1px solid var(--border);
+      border-radius: 8px 8px 0 0;
+    }
+    .main-content { min-height: 60vh; }
+  }
 </style>
 </head>
 <body>
-  <h1>旅行规划 Demo</h1>
+<div id="app">
+  <div id="app-header">
+    <h1>旅行规划 Demo</h1>
+    <button id="btn-new-plan" style="display:none" title="开始新计划">+ 新计划</button>
+  </div>
+
   <div class="banner">景点来自高德/腾讯/百度多平台交叉(≥2 平台命中标「多平台确认」);未配置密钥时使用内置演示景点(mock)。
   交通/住宿为演示数据。价格均以实际平台为准。点击图片可放大查看。</div>
 
-  <details id="cfg" style="margin:10px 0">
-    <summary>⚙️ 模型配置(用于语义理解 / 逐日规划 / 实时搜索;不配则用内置演示模式)</summary>
-    <div style="display:grid;gap:8px;margin-top:8px">
-      <label>供应商
-        <select id="k_provider" style="width:100%">
-          <option value="anthropic">Anthropic(Claude)</option>
-          <option value="openai">OpenAI 兼容(DeepSeek 等)</option>
-        </select>
-      </label>
-      <label>API Key
-        <input type="password" id="k_api" placeholder="sk-ant-…" autocomplete="off" style="width:100%" />
-      </label>
-      <label>Base URL(可选,走网关/代理)
-        <input type="text" id="k_base" placeholder="留空使用官方端点" style="width:100%" />
-      </label>
-      <div style="display:flex;gap:8px">
-        <label style="flex:1">解析模型<input type="text" id="k_parse" placeholder="claude-haiku-4-5" /></label>
-        <label style="flex:1">规划模型<input type="text" id="k_plan" placeholder="claude-sonnet-5" /></label>
+  <!-- Initial input area -->
+  <div id="input-area">
+    <details id="cfg" style="margin:10px 0">
+      <summary>⚙️ 模型配置(用于语义理解 / 逐日规划 / 实时搜索;不配则用内置演示模式)</summary>
+      <div style="display:grid;gap:8px;margin-top:8px">
+        <label>供应商
+          <select id="k_provider" style="width:100%">
+            <option value="anthropic">Anthropic(Claude)</option>
+            <option value="openai">OpenAI 兼容(DeepSeek 等)</option>
+          </select>
+        </label>
+        <label>API Key
+          <input type="password" id="k_api" placeholder="sk-ant-…" autocomplete="off" style="width:100%" />
+        </label>
+        <label>Base URL(可选,走网关/代理)
+          <input type="text" id="k_base" placeholder="留空使用官方端点" style="width:100%" />
+        </label>
+        <div style="display:flex;gap:8px">
+          <label style="flex:1">解析模型<input type="text" id="k_parse" placeholder="claude-haiku-4-5" /></label>
+          <label style="flex:1">规划模型<input type="text" id="k_plan" placeholder="claude-sonnet-5" /></label>
+        </div>
+        <div>
+          <button type="button" id="cfg_save">保存</button>
+          <button type="button" id="cfg_test">测试连接</button>
+          <button type="button" id="cfg_clear">清除</button>
+          <span id="cfg_status" class="muted"></span>
+        </div>
       </div>
-      <div>
-        <button type="button" id="cfg_save">保存</button>
-        <button type="button" id="cfg_test">测试连接</button>
-        <button type="button" id="cfg_clear">清除</button>
-        <span id="cfg_status" class="muted"></span>
-      </div>
-    </div>
-  </details>
+    </details>
 
-  <p><label for="text">你的旅行需求:</label></p>
-  <textarea id="text" placeholder="例:上海出发带老人去西安 5 天,人均 3000,偏人文古迹"></textarea>
-  <p>
-    <label><input type="checkbox" id="web" /> 启用实时网页检索(开放时间/票价/攻略,多花少量 token)</label>
-    <span style="display:inline-block;width:12px"></span>
-    <button id="go">生成计划</button>
-  </p>
-
-  <div id="out" hidden>
-    <div class="card" id="summary"></div>
-    <div class="card" id="days"></div>
-    <div class="card" id="map-wrap">
-      <b>景点分布地图</b>
-      <div id="poi-map"></div>
-    </div>
-    <div class="card" id="pois"></div>
-    <div class="card" id="cost"></div>
-    <div class="card" id="reco"></div>
+    <p><label for="text">你的旅行需求:</label></p>
+    <textarea id="text" placeholder="例:上海出发带老人去西安 5 天,人均 3000,偏人文古迹"></textarea>
+    <p>
+      <label><input type="checkbox" id="web" /> 启用实时网页检索(开放时间/票价/攻略,多花少量 token)</label>
+      <span style="display:inline-block;width:12px"></span>
+      <button id="go">生成计划</button>
+    </p>
   </div>
+
+  <!-- Error display -->
   <div id="err" class="err" hidden></div>
 
-  <div id="refine-wrap" hidden>
-    <p><label for="feedback">继续完善(追问):</label></p>
-    <textarea id="feedback" placeholder="例:预算降到2000 / 第二天轻松点 / 改成5天 / 加一个亲子景点"></textarea>
-    <p style="margin-top:8px"><button id="refine_go">更新计划</button></p>
-    <div id="history" class="muted" style="margin-top:8px"></div>
-  </div>
+  <!-- Split layout: shown after plan generation -->
+  <div id="split-layout" hidden>
+    <!-- Left sidebar -->
+    <aside class="sidebar">
+      <h3>历史版本</h3>
+      <div id="sidebar-list"></div>
+    </aside>
 
-  <!-- Image lightbox -->
-  <div id="lightbox" onclick="this.classList.remove('show')">
-    <img id="lightbox-img" src="" alt="" />
+    <!-- Right main content -->
+    <main class="main-content">
+      <div id="plan-view">
+        <div class="card" id="summary"></div>
+        <div class="card" id="days"></div>
+        <div class="card" id="map-wrap">
+          <b>景点分布地图</b>
+          <div id="poi-map"></div>
+        </div>
+        <div class="card" id="pois"></div>
+        <div class="card" id="cost"></div>
+        <div class="card" id="reco"></div>
+      </div>
+
+      <!-- Refine bar -->
+      <div class="refine-bar" id="refine-wrap" hidden>
+        <textarea id="feedback" placeholder="例:预算降到2000 / 第二天轻松点 / 改成5天 / 加一个亲子景点" rows="2"></textarea>
+        <button id="refine_go">更新计划</button>
+        <span id="refine-status" class="muted"></span>
+      </div>
+    </main>
   </div>
+</div>
+
+<!-- Image lightbox -->
+<div id="lightbox" onclick="this.classList.remove('show')">
+  <img id="lightbox-img" src="" alt="" />
+</div>
 
 <script>
 const $ = (s) => document.querySelector(s);
 function escapeHtml(s){return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
-$('#go').onclick = async () => {
-  const out = $('#out'), err = $('#err');
-  err.hidden = true; out.hidden = true;
-  const payload = { text: $('#text').value.trim(), web_research: $('#web').checked };
-  if (!payload.text) { err.textContent = '请先输入旅行需求。'; err.hidden = false; return; }
-  let data;
-  try {
-    const r = await fetch('/api/plan', { method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-    data = await r.json();
-    if (!r.ok) throw new Error(typeof data.detail==='string' ? data.detail : JSON.stringify(data.detail));
-  } catch (e) { err.textContent = '请求失败:' + e.message; err.hidden = false; return; }
-  render(data);
-  _sessionId = data.session_id || null;
-  _history = [];
-  $('#refine-wrap').hidden = !_sessionId;
-  renderHistory();
-};
-
-/* ---- POI -> map lookup for activity enrichment ---- */
+/* ---- State ---- */
 let _poiMap = {};
 let _sessionId = null;
 let _history = [];
+let _currentPlan = null;
+let _currentVersionIdx = -1;
 const KIND_LABEL = { transport:'交通', meal:'餐饮', sight:'景点', hotel:'住宿', rest:'休息', note:'备注' };
+
+/* ---- localStorage ---- */
+function saveSessionId(sid) {
+  try { if (sid) localStorage.setItem('travel_plan_sid', sid); else localStorage.removeItem('travel_plan_sid'); } catch {}
+}
+function loadSessionId() {
+  try { return localStorage.getItem('travel_plan_sid'); } catch { return null; }
+}
+
+/* ---- Loading ---- */
+function showLoading(el) {
+  if (!el) return;
+  if (el.querySelector('.loading-overlay')) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'loading-overlay';
+  overlay.innerHTML = '<div class="spinner"></div>';
+  const origPos = el.style.position;
+  el.style.position = el.style.position || 'relative';
+  el.appendChild(overlay);
+}
+function hideLoading(el) {
+  if (!el) return;
+  const overlay = el.querySelector('.loading-overlay');
+  if (overlay) overlay.remove();
+}
+
+/* ---- Layout transition ---- */
+function enterSplitLayout() {
+  $('#input-area').classList.add('collapsed');
+  $('#split-layout').hidden = false;
+  $('#btn-new-plan').style.display = '';
+}
+function exitSplitLayout() {
+  $('#input-area').classList.remove('collapsed');
+  $('#split-layout').hidden = true;
+  $('#btn-new-plan').style.display = 'none';
+  $('#plan-view').innerHTML = `
+    <div class="card" id="summary"></div>
+    <div class="card" id="days"></div>
+    <div class="card" id="map-wrap"><b>景点分布地图</b><div id="poi-map"></div></div>
+    <div class="card" id="pois"></div>
+    <div class="card" id="cost"></div>
+    <div class="card" id="reco"></div>`;
+}
+
+/* ---- Sidebar ---- */
+function renderSidebar() {
+  const list = $('#sidebar-list');
+  if (!list) return;
+  let html = `<div class="sidebar-item ${_currentVersionIdx===-1?'active':''}" onclick="selectVersion(-1)">
+    <div class="item-title">初始计划</div>
+    <div class="item-time">${new Date().toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div>
+  </div>`;
+  (_history||[]).forEach((h, i) => {
+    const active = _currentVersionIdx === i ? 'active' : '';
+    html += `<div class="sidebar-item ${active}" onclick="selectVersion(${i})">
+      <div class="item-title">#${i+1} ${escapeHtml(h.feedback)}</div>
+      <div class="item-time">${escapeHtml(String(h.note||'').slice(0,50))}${h.snapshot ? ' <span class="item-badge">快照</span>' : ''}</div>
+    </div>`;
+  });
+  list.innerHTML = html;
+}
+
+/* ---- Version rollback ---- */
+function selectVersion(idx) {
+  _currentVersionIdx = idx;
+  renderSidebar();
+  if (idx === -1) {
+    // Show initial plan (the first rendered plan)
+    if (_currentPlan) render(_currentPlan);
+    return;
+  }
+  const entry = _history[idx];
+  if (entry && entry.snapshot) {
+    render(entry.snapshot);
+    renderDiffBanner(_currentPlan, entry.snapshot, idx + 1);
+    _currentPlan = entry.snapshot;
+  }
+}
+
+/* ---- Diff banner ---- */
+function renderDiffBanner(prev, curr, versionNum) {
+  if (!prev || !curr) return;
+  const changes = [];
+  if (prev.budget_status !== curr.budget_status) {
+    changes.push(`预算: ${prev.budget_status==='ok'?'未超':'超出'} → ${curr.budget_status==='ok'?'未超':'超出'}`);
+  }
+  const prevDays = (prev.days||[]).length, currDays = (curr.days||[]).length;
+  if (prevDays !== currDays) changes.push(`天数: ${prevDays} → ${currDays}`);
+  const prevCost = prev.cost_breakdown?.per_person, currCost = curr.cost_breakdown?.per_person;
+  if (prevCost != null && currCost != null && prevCost !== currCost) {
+    changes.push(`人均: ¥${prevCost} → ¥${currCost}`);
+  }
+  if (changes.length) {
+    const banner = changes.map(c => `<span class="diff-badge diff-changed">${escapeHtml(c)}</span>`).join('');
+    const summary = $('#summary');
+    if (summary) {
+      summary.insertAdjacentHTML('afterbegin', `<div style="margin-bottom:8px"><b>第 ${versionNum} 版变更:</b> ${banner}</div>`);
+    }
+  }
+}
+
+/* ---- Render POI lookup ---- */
 function buildPoiMap(pois) {
   _poiMap = {};
   (pois||[]).forEach(p => { _poiMap[p.name] = p; });
@@ -220,6 +409,7 @@ function showLightbox(src) {
 /* ---- POI Map (SVG scatter using lng/lat) ---- */
 function renderPoiMap(pois) {
   const map = $('#poi-map');
+  if (!map) return;
   const withCoords = (pois||[]).filter(p => p.lng != null && p.lat != null);
   if (withCoords.length < 2) {
     map.innerHTML = `<div class="map-hide">📍 景点坐标数据不足，无法绘制分布图（至少需 2 个有经纬线的景点）</div>`;
@@ -230,7 +420,6 @@ function renderPoiMap(pois) {
   const minLat = Math.min(...lats), maxLat = Math.max(...lats);
   const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
   const pad = 40;
-  // 使用固定尺寸避免 clientWidth=0 问题
   const W = map.clientWidth || 900, H = map.clientHeight || 280;
   const xScale = (lng) => pad + (lng - minLng) / (maxLng - minLng || 1) * (W - pad*2);
   const yScale = (lat) => pad + (maxLat - lat) / (maxLat - minLat || 1) * (H - pad*2);
@@ -277,12 +466,13 @@ function renderPoiMap(pois) {
   });
 }
 
-/* ---- Map link helper for POI table ---- */
+/* ---- Map link helper ---- */
 function mapLinkHtml(url) {
   if (!url) return '<span class="muted">—</span>';
   return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">查看地图 ↗</a>`;
 }
 
+/* ---- Main render ---- */
 function render(d) {
   buildPoiMap(d.pois);
 
@@ -295,7 +485,7 @@ function render(d) {
     `<b>${escapeHtml(d.request_summary)}</b> ${flags}<br><div class="muted">来源:${d.sources.join('、')}</div>`
     + `<div style="margin-top:6px">${escapeHtml(d.note)}</div>`;
 
-  /* ---- Days with enriched POI images/links ---- */
+  /* Days */
   const daysHtml = (d.days||[]).map(x => {
     const acts = (x.activities||[]).map(a => {
       const isStr = typeof a === 'string';
@@ -318,10 +508,10 @@ function render(d) {
   }).join('');
   $('#days').innerHTML = `<b>逐日行程</b>` + (daysHtml || '<div class="muted">无</div>');
 
-  /* ---- POI Map ---- */
+  /* POI Map */
   renderPoiMap(d.pois);
 
-  /* ---- POI table with images and links ---- */
+  /* POI table */
   const poiRows = (d.pois||[]).map(p =>
     `<tr>
       <td style="text-align:center">${thumbHtml(p.image_url, p.name)}</td>
@@ -338,47 +528,109 @@ function render(d) {
     `<b>候选景点(${(d.pois||[]).length})</b>`
     + `<div class="table-scroll"><table><tr><th>图片</th><th>名称</th><th>来源</th><th>类别</th><th>门票</th><th>开放</th><th>详情</th></tr>${poiRows||'<tr><td colspan=7>无</td></tr>'}</table></div>`;
 
-  /* ---- Cost ---- */
+  /* Cost */
   const c = d.cost_breakdown||{};
   $('#cost').innerHTML = `<b>费用估算</b><table><tr><th>往返交通</th><th>住宿</th><th>门票</th>`
     + `<th>餐饮</th><th>合计</th><th>人均</th></tr>`
     + `<tr><td>${c.transport||0}</td><td>${c.hotels||0}</td><td>${c.tickets||0}</td>`
     + `<td>${c.meals||0}</td><td><b>${c.total||0}</b></td><td><b>${c.per_person||0}</b></td></tr></table>`;
 
-  /* ---- Recommendations ---- */
+  /* Recommendations */
   const recHtml = (d.recommendations||[]).map(r=>
     `<div>· <b>${escapeHtml(r.label)}</b> — ${r.price} 元 <span class="muted">(${escapeHtml(r.reason)})</span></div>`).join('');
   $('#reco').innerHTML = `<b>推荐</b>` + (recHtml||'<div class="muted">无</div>');
-  $('#out').hidden = false;
-  $('#out').scrollIntoView({behavior:'smooth'});
 }
 
-function renderHistory() {
-  const box = $('#history');
-  if (!_history.length) { box.innerHTML = ''; return; }
-  box.innerHTML = _history.map((h, i) =>
-    `<div>#${i+1} 「${escapeHtml(h.feedback)}」 → ${escapeHtml(String(h.note||'').slice(0,80))}</div>`
-  ).join('');
-}
+/* ---- Initial plan generation ---- */
+$('#go').onclick = async () => {
+  const btn = $('#go');
+  const out = $('#plan-view'), err = $('#err');
+  err.hidden = true;
+  const payload = { text: $('#text').value.trim(), web_research: $('#web').checked };
+  if (!payload.text) { err.textContent = '请先输入旅行需求。'; err.hidden = false; return; }
 
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 生成中…';
+  showLoading($('#input-area'));
+
+  let data;
+  try {
+    const r = await fetch('/api/plan', { method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    data = await r.json();
+    if (!r.ok) throw new Error(typeof data.detail==='string' ? data.detail : JSON.stringify(data.detail));
+  } catch (e) { err.textContent = '请求失败:' + e.message; err.hidden = false; hideLoading($('#input-area')); btn.disabled = false; btn.textContent = '生成计划'; return; }
+
+  hideLoading($('#input-area'));
+  btn.disabled = false;
+  btn.textContent = '生成计划';
+
+  render(data);
+  _currentPlan = JSON.parse(JSON.stringify(data));
+  _sessionId = data.session_id || null;
+  _history = [];
+  _currentVersionIdx = -1;
+  saveSessionId(_sessionId);
+
+  // Transition to split layout
+  enterSplitLayout();
+  renderSidebar();
+  if (_sessionId) {
+    $('#refine-wrap').hidden = false;
+  }
+
+  // Scroll to plan
+  $('#plan-view').scrollIntoView({behavior:'smooth'});
+};
+
+/* ---- Refine ---- */
 $('#refine_go').onclick = async () => {
+  const btn = $('#refine_go');
   const err = $('#err');
   err.hidden = true;
   const feedback = $('#feedback').value.trim();
   if (!feedback) { err.textContent = '请先输入追问内容。'; err.hidden = false; return; }
   if (!_sessionId) { err.textContent = '尚未生成计划,无法继续完善。'; err.hidden = false; return; }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 更新中…';
+  showLoading($('#plan-view'));
+
   let data;
   try {
     const r = await fetch(`/api/plan/${_sessionId}/refine`, { method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({ feedback }) });
     data = await r.json();
     if (!r.ok) throw new Error(typeof data.detail==='string' ? data.detail : JSON.stringify(data.detail));
-  } catch (e) { err.textContent = '更新失败:' + e.message; err.hidden = false; return; }
-  _history.push({ feedback, note: data.note });
+  } catch (e) { err.textContent = '更新失败:' + e.message; err.hidden = false; hideLoading($('#plan-view')); btn.disabled = false; btn.textContent = '更新计划'; return; }
+
+  hideLoading($('#plan-view'));
+  btn.disabled = false;
+  btn.textContent = '更新计划';
+
+  // Push to history (the snapshot from the server includes the PREVIOUS plan)
+  _history.push({ feedback, note: data.note, snapshot: data.history?.[data.history.length-1]?.snapshot || null });
+  _currentPlan = JSON.parse(JSON.stringify(data));
+  _currentVersionIdx = _history.length - 1;
+  saveSessionId(_sessionId);
+
   render(data);
-  _sessionId = data.session_id || _sessionId;
-  renderHistory();
+  renderSidebar();
   $('#feedback').value = '';
+
+  // Show brief status
+  const status = $('#refine-status');
+  if (status) { status.textContent = '已更新 ✓'; setTimeout(() => { status.textContent = ''; }, 3000); }
+};
+
+/* ---- New plan ---- */
+$('#btn-new-plan').onclick = () => {
+  _sessionId = null; _history = []; _currentPlan = null; _currentVersionIdx = -1;
+  saveSessionId(null);
+  exitSplitLayout();
+  $('#refine-wrap').hidden = true;
+  $('#text').value = '';
+  $('#err').hidden = true;
 };
 
 /* ---- 模型配置 ---- */
@@ -425,7 +677,6 @@ async function testCfg() {
 }
 $('#k_provider').onchange = () => {
   const isOpen = $('#k_provider').value === 'openai';
-  // 切换供应商后清空 base_url/模型(保留 API Key),让后端按供应商默认值生效
   $('#k_base').value = ''; $('#k_parse').value = ''; $('#k_plan').value = '';
   applyProviderPlaceholders(isOpen);
 };
@@ -437,7 +688,29 @@ $('#cfg_clear').onclick = async () => {
   await saveCfg();
   setCfgStatus('已清除配置,回到演示模式');
 };
-refreshCfg();
+
+/* ---- Page init: try to restore session ---- */
+(async function init() {
+  const sid = loadSessionId();
+  if (sid) {
+    try {
+      const r = await fetch(`/api/plan/${sid}`);
+      if (r.ok) {
+        const data = await r.json();
+        _sessionId = sid;
+        _currentPlan = JSON.parse(JSON.stringify(data));
+        _history = data.history || [];
+        enterSplitLayout();
+        render(data);
+        renderSidebar();
+        if (_sessionId) $('#refine-wrap').hidden = false;
+        return;
+      }
+    } catch {}
+  }
+  // No session: keep input area visible
+  refreshCfg();
+})();
 </script>
 </body>
 </html>

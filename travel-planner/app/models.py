@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+# 必须在导入 BaseModel 之前加载,以确保 v2 API polyfill 已生效
+import app.pydantic_compat  # noqa: F401, isort:skip
+
+from datetime import date, datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -42,7 +45,7 @@ class TransportQuote(BaseModel):
     price: float
     currency: str = "CNY"
     travel_class: str = "标准"
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def dedup_key(self) -> str:
@@ -60,7 +63,7 @@ class HotelQuote(BaseModel):
     currency: str = "CNY"
     is_refundable: bool = False
     rating: float | None = Field(default=None, description="点评分,如 4.5")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def dedup_key(self) -> str:
@@ -102,7 +105,7 @@ class Activity(BaseModel):
 
     time: str = Field(default="", description="时段,如 09:00-11:30")
     title: str = Field(description="活动内容,如 游览甲秀楼")
-    kind: str = Field(default="sight", description="transport/meal/sight/hotel/rest/note")
+    kind: Literal["transport", "meal", "sight", "hotel", "rest", "note"] = Field(default="sight", description="transport/meal/sight/hotel/rest/note")
     poi_name: str = Field(default="", description="关联景点名,用于前端富化")
     note: str = Field(default="", description="补充说明")
 

@@ -196,9 +196,19 @@ def refine(session_id: str, body: RefineRequest) -> PlanResponse:
     state.cost = cost
     state.live_info = live
     state.plan = plan
-    state.history.append({"feedback": body.feedback, "note": plan.note})
+    state.history.append(sessions.HistoryEntry(
+        feedback=body.feedback,
+        note=plan.note,
+        snapshot=plan.model_dump(mode="json"),
+    ))
     sessions.update(session_id, state)
     return plan
+
+
+@app.get("/api/sessions")
+def list_sessions() -> list[dict]:
+    """返回所有未过期会话的摘要列表,供前端左侧面板使用。"""
+    return sessions.list_all()
 
 
 @app.get("/api/plan/{session_id}", response_model=PlanResponse)

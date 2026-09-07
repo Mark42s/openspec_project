@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.models import ResultBundle, TripRequest
@@ -65,7 +65,7 @@ def record_snapshot(
     if owned:
         conn = connect()
     constraint_hash = _hash_request(request)
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     rows = 0
     try:
         for q in bundle.transport:
