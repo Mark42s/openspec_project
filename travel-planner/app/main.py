@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import anthropic
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -132,7 +131,7 @@ def set_model_config(body: ModelConfigRequest) -> dict:
 
 @app.post("/api/config/model/test")
 def test_model_config() -> dict:
-    """按供应商连通测试(仅查询模型元数据,不产生生成 token)。"""
+    """按供应商连通测试(openai:查询模型元数据;anthropic:最小 token 探针)。"""
     if not model_runtime.configured():
         raise HTTPException(status_code=400, detail="请先填写并保存 API Key 再测试。")
     try:
@@ -146,16 +145,28 @@ def test_model_config() -> dict:
             if resp.status_code != 200:
                 raise RuntimeError(f"{resp.status_code} {resp.text[:300]}")
             return {"ok": True, "model": model_runtime.plan_model()}
-        kwargs: dict = {"api_key": model_runtime.api_key()}
-        base = model_runtime.anthropic_base_url()
-        if base:
-            kwargs["base_url"] = base
-        model = anthropic.Anthropic(**kwargs).models.retrieve(
-            model_id=model_runtime.plan_model()
+        base = model_runtime.anthropic_base_url() or "https://api.anthropic.com"
+        base = base.rstrip("/")
+        # 不走 SDK:部分环境装不上新版 anthropic;用最小请求探测连通性
+        resp = httpx.post(
+            f"{base}/v1/messages",
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": model_runtime.api_key(),
+                "anthropic-version": "2023-06-01",
+            },
+            json={
+                "model": model_runtime.plan_model(),
+                "max_tokens": 8,
+                "messages": [{"role": "user", "content": "回复 ok"}],
+            },
+            timeout=30.0,
         )
+        if resp.status_code != 200:
+            raise RuntimeError(f"{resp.status_code} {resp.text[:300]}")
+        return {"ok": True, "model": model_runtime.plan_model()}
     except Exception as exc:  # noqa: BLE001 - 统一转 400,避免堆栈外泄为「未知错误」
         raise HTTPException(status_code=400, detail=f"连接失败: {exc}") from exc
-    return {"ok": True, "model": getattr(model, "id", model_runtime.plan_model())}
 
 
 @app.post("/api/plan", response_model=PlanResponse)

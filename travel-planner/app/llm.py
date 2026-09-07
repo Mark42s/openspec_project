@@ -20,10 +20,6 @@ import anthropic
 import httpx
 from pydantic import BaseModel, Field
 
-# 某些安装环境(如 MSYS 平台的旧包)缺 APIError 属性;兜底为 Exception,
-# 保证 SDK 错误能被统一转成 RuntimeError 而不是二次抛 AttributeError。
-_ANTHROPIC_ERROR = getattr(anthropic, "APIError", Exception)
-
 from app import model_runtime as rt
 from app.models import (
     Activity,
@@ -159,6 +155,79 @@ def _openai_parse(prompt: str, output_model: type[_ModelT], model: str) -> _Mode
         raise RuntimeError(f"OpenAI 兼容响应解析失败: {exc}") from exc
 
 
+def _extract_json(text: str) -> dict:
+    """宽容解析模型文本中的 JSON:容忍代码块围栏与首尾杂质。"""
+    s = text.strip()
+    if s.startswith("```"):
+        s = s.split("\n", 1)[-1]
+        s = s.rsplit("```", 1)[0].strip()
+    try:
+        return json.loads(s)
+    except ValueError:
+        start, end = s.find("{"), s.rfind("}")
+        if 0 <= start < end:
+            return json.loads(s[start : end + 1])
+        raise
+
+
+def _anthropic_parse(prompt: str, output_model: type[_ModelT], model: str, max_tokens: int = 4000) -> _ModelT:
+    """Anthropic Messages API(含本机 Claude 代理)JSON 模式:httpx 直调 → pydantic 校验。
+
+    不走 anthropic SDK:部分环境(如 MSYS 平台 venv)装不上新版 SDK(jiter 无 wheel),
+    且 Claude Code 代理网关只暴露 Anthropic 格式端点。与 _openai_parse 同款策略:
+    提示词内嵌 JSON schema,解析响应中的 text block;响应可能含 thinking block,需跳过。
+    长输出偶发畸形 JSON,失败自动重试一次。
+    """
+    base = (rt.anthropic_base_url() or "https://api.anthropic.com").rstrip("/")
+    key = rt.api_key()
+    schema = output_model.model_json_schema()
+    full_prompt = (
+        "请严格只输出一个 JSON 对象,不要输出任何 JSON 以外的文字或代码块标记。"
+        f"JSON 的字段与类型必须符合以下 schema:\n{json.dumps(schema, ensure_ascii=False)}\n"
+        f"任务:\n{prompt}"
+    )
+    last_text = ""
+    for attempt in range(2):
+        try:
+            resp = httpx.post(
+                f"{base}/v1/messages",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "temperature": 0,
+                    "messages": [{"role": "user", "content": full_prompt}],
+                },
+                timeout=240.0,
+            )
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Anthropic 调用失败: {exc}") from exc
+        if resp.status_code != 200:
+            raise RuntimeError(f"Anthropic 调用失败: {resp.status_code} {resp.text[:300]}")
+        data = resp.json()
+        content = data.get("content") or []
+        text = "\n".join(b.get("text", "") for b in content if b.get("type") == "text").strip()
+        if not text:
+            # 部分网关后端(如 DeepSeek 系)会输出极长 thinking 耗尽预算,
+            # 导致 text 缺失;报错时说明原因,便于定位
+            stop = data.get("stop_reason")
+            raise RuntimeError(
+                f"Anthropic 响应无文本内容(stop_reason={stop});"
+                "若为 max_tokens 说明模型思考过长,请增大 _anthropic_parse 的 max_tokens"
+            )
+        last_text = text
+        try:
+            return output_model.model_validate(_extract_json(text))
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue  # 畸形 JSON:重试一次
+    head = last_text[:200].replace("\n", " ")
+    raise RuntimeError(f"Anthropic 响应解析失败(已重试一次): {head}")
+
+
 def parse_intent(text: str) -> TripRequest:
     """把自然语言解析为结构化约束。无 key 时退化为确定性规则解析。"""
     if not configured():
@@ -181,16 +250,7 @@ def parse_intent(text: str) -> TripRequest:
     if provider() == "openai":
         req = _openai_parse(prompt, TripRequest, parse_model())
     else:
-        try:
-            resp = _client().messages.parse(
-                model=parse_model(),
-                max_tokens=4000,
-                messages=[{"role": "user", "content": prompt}],
-                output_format=TripRequest,
-            )
-            req = resp.parsed_output
-        except _ANTHROPIC_ERROR as exc:
-            raise RuntimeError(f"意图解析调用失败: {exc}") from exc
+        req = _anthropic_parse(prompt, TripRequest, parse_model(), max_tokens=8000)
     req = _clamp_start_date(req)
     return _apply_transport_hints(text, req)
 
@@ -303,16 +363,7 @@ def parse_feedback(prior: TripRequest, feedback: str) -> TripRequest:
     if provider() == "openai":
         req = _openai_parse(prompt, TripRequest, parse_model())
     else:
-        try:
-            resp = _client().messages.parse(
-                model=parse_model(),
-                max_tokens=4000,
-                messages=[{"role": "user", "content": prompt}],
-                output_format=TripRequest,
-            )
-            req = resp.parsed_output
-        except _ANTHROPIC_ERROR as exc:
-            raise RuntimeError(f"追问解析调用失败: {exc}") from exc
+        req = _anthropic_parse(prompt, TripRequest, parse_model(), max_tokens=8000)
     req = _clamp_start_date(req)
     return _apply_transport_hints(feedback, req)
 
@@ -394,16 +445,7 @@ def build_plan(
     if provider() == "openai":
         p = _openai_parse(prompt, ItineraryPlan, plan_model())
     else:
-        try:
-            resp = _client().messages.parse(
-                model=plan_model(),
-                max_tokens=8000,
-                messages=[{"role": "user", "content": prompt}],
-                output_format=ItineraryPlan,
-            )
-            p = resp.parsed_output
-        except _ANTHROPIC_ERROR as exc:
-            raise RuntimeError(f"逐日规划调用失败: {exc}") from exc
+        p = _anthropic_parse(prompt, ItineraryPlan, plan_model(), max_tokens=20000)
 
     return _assemble_plan(request, bundle, pois, cost, p, live_info)
 
@@ -515,16 +557,7 @@ def refine_plan(
     if provider() == "openai":
         p = _openai_parse(prompt, ItineraryPlan, plan_model())
     else:
-        try:
-            resp = _client().messages.parse(
-                model=plan_model(),
-                max_tokens=8000,
-                messages=[{"role": "user", "content": prompt}],
-                output_format=ItineraryPlan,
-            )
-            p = resp.parsed_output
-        except _ANTHROPIC_ERROR as exc:
-            raise RuntimeError(f"细化规划调用失败: {exc}") from exc
+        p = _anthropic_parse(prompt, ItineraryPlan, plan_model(), max_tokens=20000)
 
     return _assemble_plan(request, bundle, pois, cost, p, live_info)
 
