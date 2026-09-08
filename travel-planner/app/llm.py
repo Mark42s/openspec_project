@@ -187,6 +187,7 @@ def _anthropic_parse(prompt: str, output_model: type[_ModelT], model: str, max_t
         f"任务:\n{prompt}"
     )
     last_text = ""
+    budget = max_tokens
     for attempt in range(2):
         try:
             resp = httpx.post(
@@ -198,7 +199,7 @@ def _anthropic_parse(prompt: str, output_model: type[_ModelT], model: str, max_t
                 },
                 json={
                     "model": model,
-                    "max_tokens": max_tokens,
+                    "max_tokens": budget,
                     "temperature": 0,
                     "messages": [{"role": "user", "content": full_prompt}],
                 },
@@ -213,7 +214,10 @@ def _anthropic_parse(prompt: str, output_model: type[_ModelT], model: str, max_t
         text = "\n".join(b.get("text", "") for b in content if b.get("type") == "text").strip()
         if not text:
             # 部分网关后端(如 DeepSeek 系)会输出极长 thinking 耗尽预算,
-            # 导致 text 缺失;报错时说明原因,便于定位
+            # 导致 text 缺失;截断时放大预算重试一次,否则报错说明原因
+            if data.get("stop_reason") == "max_tokens" and attempt == 0:
+                budget = int(budget * 1.5)
+                continue
             stop = data.get("stop_reason")
             raise RuntimeError(
                 f"Anthropic 响应无文本内容(stop_reason={stop});"
@@ -253,7 +257,7 @@ def parse_intent(text: str) -> TripRequest:
     if provider() == "openai":
         req = _openai_parse(prompt, TripRequest, parse_model())
     else:
-        req = _anthropic_parse(prompt, TripRequest, parse_model(), max_tokens=8000)
+        req = _anthropic_parse(prompt, TripRequest, parse_model(), max_tokens=10000)
     req = _clamp_start_date(req)
     return _apply_scene_hints(text, _apply_transport_hints(text, req))
 
@@ -286,24 +290,33 @@ def _apply_transport_hints(text: str, req: TripRequest) -> TripRequest:
 
 
 # 出行场景词表:与模型软约束互补的确定性硬兜底(晕车/节奏/轻装)
+# 否定表达优先于肯定词,避免「不会晕/不要轻装」被误置位
 _SCENE_MOTION = re.compile(r"晕车|容易晕|怕晕|会晕|晕得|坐车.*晕")
+_SCENE_MOTION_NOT = re.compile(r"不晕车|不会晕|不怕晕|不晕")
 _SCENE_PACE_RELAXED = re.compile(r"轻松|不赶|休闲|慢慢玩|慢节奏|体力一般|别太赶|节奏放慢|宽松")
 _SCENE_PACE_INTENSIVE = re.compile(r"紧凑|特种兵|暴走|赶时间|节奏快|密度高|体力好|不怕累")
 _SCENE_PACK_LIGHT = re.compile(r"轻装|不拖(?:行李|箱子|箱)|行李越少|背包走|背个包就|不想(?:拖|拎|拉)(?:行李|箱子|箱)")
+# 明确的"带箱"行为(前面不是 不/没)才视为否定轻装;「不带行李箱但背包走」不被误伤
+_SCENE_PACK_NOT = re.compile(r"(?<!不)(?<!没)带(?:着|上)?(?:行李|箱子|行李箱)|(?:拖着|要拖)(?:行李|箱子|行李箱)|拉行李箱")
 
 
 def _apply_scene_hints(text: str, req: TripRequest) -> TripRequest:
     """确定性校验层:原文命中出行场景表达时强制置位(晕车/节奏/轻装)。
 
-    仅在提及词表时更新;未提及保持原值——refine 场景天然满足「只在反馈提及时改」。
+    否定表达(「不会晕」「不要轻装」)会把对应字段强制回 False——refine 中
+    用户反悔时同样生效;仅在文本提及时更新,未提及保持原值。
     """
-    if _SCENE_MOTION.search(text):
+    if _SCENE_MOTION_NOT.search(text):
+        req.motion_sickness = False
+    elif _SCENE_MOTION.search(text):
         req.motion_sickness = True
     if _SCENE_PACE_RELAXED.search(text):
         req.travel_pace = "relaxed"
     elif _SCENE_PACE_INTENSIVE.search(text):
         req.travel_pace = "intensive"
-    if _SCENE_PACK_LIGHT.search(text):
+    if _SCENE_PACK_NOT.search(text):
+        req.pack_light = False
+    elif _SCENE_PACK_LIGHT.search(text):
         req.pack_light = True
     return req
 
@@ -391,7 +404,7 @@ def parse_feedback(prior: TripRequest, feedback: str) -> TripRequest:
     if provider() == "openai":
         req = _openai_parse(prompt, TripRequest, parse_model())
     else:
-        req = _anthropic_parse(prompt, TripRequest, parse_model(), max_tokens=8000)
+        req = _anthropic_parse(prompt, TripRequest, parse_model(), max_tokens=10000)
     req = _clamp_start_date(req)
     return _apply_scene_hints(feedback, _apply_transport_hints(feedback, req))
 

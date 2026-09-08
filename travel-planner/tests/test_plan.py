@@ -301,6 +301,17 @@ class TestSceneFields:
         assert req.travel_pace == "standard"
         assert req.pack_light is False
 
+    def test_negation_not_misparsed(self):
+        req = llm.parse_intent("无锡出发去贵阳7天,我坐车不会晕,不要轻装,带行李箱")
+        assert req.motion_sickness is False
+        assert req.pack_light is False
+
+    def test_refine_can_revoke(self):
+        prior = llm.parse_intent("无锡出发去贵阳7天,我晕车")
+        assert prior.motion_sickness is True
+        req = llm.parse_feedback(prior, "其实我不晕车,放心安排大巴")
+        assert req.motion_sickness is False
+
     def test_refine_updates_only_mentioned(self):
         prior = llm.parse_intent("无锡出发去贵阳7天,轻装")
         assert prior.pack_light is True
@@ -318,7 +329,9 @@ class TestResilienceTips:
 
         assert "晕车" in resilience.summary(TripRequest(motion_sickness=True), "拼车/包车前往")
         assert resilience.summary(TripRequest(motion_sickness=True), "高铁直达") == ""
-        assert "寄存" in resilience.summary(TripRequest(pack_light=True), "")
+        assert "寄存" in resilience.summary(TripRequest(pack_light=True, days=5), "")
+        # 单日周边游无跨宿迁移,不提示寄存
+        assert resilience.summary(TripRequest(pack_light=True, days=1), "") == ""
         assert "恢复窗口" in resilience.summary(
             TripRequest(travel_pace="intensive", days=7), ""
         )

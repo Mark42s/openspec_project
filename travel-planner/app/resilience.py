@@ -25,7 +25,7 @@ def summary(request: TripRequest, corpus: str = "") -> str:
     parts: list[str] = []
     if request.motion_sickness and _LONG_ROAD.search(corpus):
         parts.append("途中含长途地面交通(拼车/包车/大巴):晕车建议坐前部靠窗、上车前半小时服晕车药、乘车时勿低头看手机。")
-    if request.pack_light:
+    if request.pack_light and (request.days or 1) > 1:
         parts.append("全程轻装:景区日可将背包寄存酒店/民宿前台,随身只带小包。")
     if request.travel_pace == "intensive" and (request.days or 0) > 4:
         parts.append("行程较紧凑且超过 4 天:建议在中段留半天恢复窗口。")
