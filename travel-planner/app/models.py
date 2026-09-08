@@ -36,6 +36,18 @@ class TripRequest(BaseModel):
         default=None,
         description="用户明确告知的往返交通总费用(元),如「两个人机票4400」;有值则计入费用分解",
     )
+    motion_sickness: bool = Field(
+        default=False,
+        description="出行场景:用户易晕车(山路/长途地面交通);命中后计划附乘车提醒",
+    )
+    travel_pace: Literal["relaxed", "standard", "intensive"] = Field(
+        default="standard",
+        description="出行节奏:relaxed 不赶/轻松,standard 常规,intensive 紧凑高密度",
+    )
+    pack_light: bool = Field(
+        default=False,
+        description="出行场景:轻装无大件行李;命中后计划附寄存/减负提示",
+    )
     missing_fields: list[str] = Field(default_factory=list, description="用户未提供、待确认的字段")
 
 
@@ -167,3 +179,7 @@ class PlanResponse(BaseModel):
     sources: list[str] = Field(default_factory=list)
     recorded_snapshot: bool = False
     session_id: str | None = Field(default=None, description="会话 ID,用于多轮细化")
+    resilience: dict | None = Field(
+        default=None,
+        description="确定性韧性摘要(乘车提醒/强度提示等);无场景约束时为 None",
+    )

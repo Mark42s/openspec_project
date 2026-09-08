@@ -282,6 +282,169 @@ class TestTransportFixed:
         assert "按已定的交通" in body["days"][0]["activities"][0]["title"]
 
 
+class TestSceneFields:
+    """出行场景字段解析:晕车/节奏/轻装(词表硬兜底,无模型依赖)。"""
+
+    def test_parse_scene_hints_full(self):
+        req = llm.parse_intent("无锡出发去贵阳7天,我有点晕车,想轻松点,轻装不想拖行李")
+        assert req.motion_sickness is True
+        assert req.travel_pace == "relaxed"
+        assert req.pack_light is True
+
+    def test_parse_intensive_pace(self):
+        req = llm.parse_intent("上海去西安5天,特种兵行程,节奏快体力好")
+        assert req.travel_pace == "intensive"
+
+    def test_defaults_when_absent(self):
+        req = llm.parse_intent("无锡出发去贵阳7天")
+        assert req.motion_sickness is False
+        assert req.travel_pace == "standard"
+        assert req.pack_light is False
+
+    def test_refine_updates_only_mentioned(self):
+        prior = llm.parse_intent("无锡出发去贵阳7天,轻装")
+        assert prior.pack_light is True
+        req = llm.parse_feedback(prior, "其实我晕车,容易晕")
+        assert req.motion_sickness is True
+        assert req.pack_light is True  # 未提及保持
+        assert req.travel_pace == "standard"
+
+
+class TestResilienceTips:
+    """韧性附言:确定性规则按场景字段生成,不改模型正文。"""
+
+    def test_summary_rules(self):
+        from app import resilience
+
+        assert "晕车" in resilience.summary(TripRequest(motion_sickness=True), "拼车/包车前往")
+        assert resilience.summary(TripRequest(motion_sickness=True), "高铁直达") == ""
+        assert "寄存" in resilience.summary(TripRequest(pack_light=True), "")
+        assert "恢复窗口" in resilience.summary(
+            TripRequest(travel_pace="intensive", days=7), ""
+        )
+        assert resilience.summary(TripRequest(), "") == ""
+
+    def test_plan_response_carries_pack_light_tip(self):
+        resp = client.post(
+            "/api/plan", json={"text": "无锡出发去贵阳7天,轻装不想拖行李"}
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["resilience"] is not None
+        assert "寄存" in body["resilience"]["tips"]
+        assert "寄存" in body["note"]
+
+    def test_plan_no_scene_fields_no_tips(self):
+        resp = client.post("/api/plan", json={"text": "无锡出发去贵阳7天"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["resilience"] is None
+
+
+class TestBackchain:
+    """倒排时刻计算(纯函数)。"""
+
+    def test_backchain_within_window(self):
+        from app import resilience
+        from datetime import datetime
+
+        r = resilience.backchain(
+            datetime(2026, 9, 29, 16, 42),
+            datetime(2026, 9, 29, 14, 0),
+            [("出园至酒店", 60), ("离店取行李", 10), ("打车去站", 40), ("安检进站", 20)],
+        )
+        assert r.feasible is True
+        labels = [label for label, _ in r.latest]
+        assert labels == ["出园至酒店", "离店取行李", "打车去站", "安检进站"]
+        times = dict(r.latest)
+        assert times["出园至酒店"] == "14:32"
+        assert times["离店取行李"] == "15:32"
+        assert times["打车去站"] == "15:42"
+        assert times["安检进站"] == "16:22"
+        assert r.buffer_min == 32  # 最早步骤(出园)最晚 14:32 开始,较 14:00 富余 32 分钟
+
+    def test_backchain_drops_optionals(self):
+        from app import resilience
+        from datetime import datetime
+
+        r = resilience.backchain(
+            datetime(2026, 9, 29, 16, 42),
+            datetime(2026, 9, 29, 14, 2),  # 窗口 160min:必须链 130 + 拍照 30 恰好放下
+            [("出园至酒店", 60), ("离店取行李", 10), ("打车去站", 40), ("安检进站", 20)],
+            [("买伴手礼", 20), ("观景拍照", 30)],
+        )
+        assert r.feasible is True
+        assert r.dropped_optional == ["买伴手礼"]
+        assert [label for label, _ in r.kept_optional] == ["观景拍照"]
+        assert r.buffer_min == 0
+
+    def test_backchain_must_over_window(self):
+        from app import resilience
+        from datetime import datetime
+
+        r = resilience.backchain(
+            datetime(2026, 9, 29, 16, 42),
+            datetime(2026, 9, 29, 14, 0),
+            [("出园至酒店", 150), ("安检进站", 20)],
+        )
+        assert r.feasible is False
+        assert "分钟" in r.must_shorten_hint
+
+
+class TestPrepCalendar:
+    """行前行动日历端点与生成规则。"""
+
+    def _make_session(self, request: TripRequest) -> str:
+        from app import sessions
+        from app.models import ResultBundle
+
+        return sessions.create(
+            sessions.PlanState(request=request, bundle=ResultBundle())
+        )
+
+    def test_calendar_confirm_when_transport_fixed(self):
+        from app import sessions
+
+        sid = self._make_session(
+            TripRequest(
+                destinations=["贵阳"],
+                start_date=date(2026, 9, 29),
+                days=7,
+                transport_fixed=True,
+            )
+        )
+        resp = client.get(f"/api/prep/{sid}/calendar")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["departure_date"] == "2026-09-29"
+        actions = [it["action"] for it in body["items"]]
+        assert any("确认已订往返交通" in a for a in actions)
+        assert not any("12306" in a for a in actions)
+        # 预约/装备/检查按倒推日出现,且不早于今天
+        due = {it["category"]: it["due_date"] for it in body["items"]}
+        assert due["reserve"] == "2026-09-22"
+        assert due["gear"] == "2026-09-26"
+        assert due["check"] == "2026-09-28"
+        for d in due.values():
+            assert d >= date.today().isoformat()
+        sessions.delete(sid) if hasattr(sessions, "delete") else None
+
+    def test_calendar_book_when_transport_not_fixed(self):
+        sid = self._make_session(
+            TripRequest(destinations=["贵阳"], start_date=date(2026, 9, 29), days=5)
+        )
+        resp = client.get(f"/api/prep/{sid}/calendar")
+        assert resp.status_code == 200
+        actions = [it["action"] for it in resp.json()["items"]]
+        assert any("12306" in a for a in actions)
+
+    def test_calendar_missing_session_404(self):
+        assert client.get("/api/prep/nope/calendar").status_code == 404
+
+    def test_calendar_missing_start_date_422(self):
+        sid = self._make_session(TripRequest(destinations=["贵阳"]))
+        assert client.get(f"/api/prep/{sid}/calendar").status_code == 422
+
+
 class TestModelConfig:
     def test_config_endpoints_roundtrip(self, monkeypatch, tmp_path):
         monkeypatch.setenv("MODEL_CONFIG_PATH", str(tmp_path / "mc.json"))

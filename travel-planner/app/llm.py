@@ -245,6 +245,9 @@ def parse_intent(text: str) -> TripRequest:
         "出行已搞定)时:transport_fixed 置 true;若用户还明确给出往返交通总花费(如「两个人机票4400」),"
         "把金额填入 fixed_transport_cost(元)。这些都不是缺失字段,不要加入 missing_fields。\n"
         "「坐飞机去」或「坐高铁去」仅表示交通偏好、并未说已买票时,transport_fixed 保持 false。\n"
+        "用户声明出行场景时也填入字段:说晕车/容易晕 → motion_sickness=true;"
+        "明确节奏偏好(不赶/轻松 → travel_pace=relaxed,紧凑/高密度/特种兵 → travel_pace=intensive);"
+        "说不带大件行李/轻装 → pack_light=true。未提及的字段保持默认,不要臆测。\n"
         "文本:\n" + text
     )
     if provider() == "openai":
@@ -252,7 +255,7 @@ def parse_intent(text: str) -> TripRequest:
     else:
         req = _anthropic_parse(prompt, TripRequest, parse_model(), max_tokens=8000)
     req = _clamp_start_date(req)
-    return _apply_transport_hints(text, req)
+    return _apply_scene_hints(text, _apply_transport_hints(text, req))
 
 
 def _clamp_start_date(req: TripRequest) -> TripRequest:
@@ -282,6 +285,29 @@ def _apply_transport_hints(text: str, req: TripRequest) -> TripRequest:
     return req
 
 
+# 出行场景词表:与模型软约束互补的确定性硬兜底(晕车/节奏/轻装)
+_SCENE_MOTION = re.compile(r"晕车|容易晕|怕晕|会晕|晕得|坐车.*晕")
+_SCENE_PACE_RELAXED = re.compile(r"轻松|不赶|休闲|慢慢玩|慢节奏|体力一般|别太赶|节奏放慢|宽松")
+_SCENE_PACE_INTENSIVE = re.compile(r"紧凑|特种兵|暴走|赶时间|节奏快|密度高|体力好|不怕累")
+_SCENE_PACK_LIGHT = re.compile(r"轻装|不拖(?:行李|箱子|箱)|行李越少|背包走|背个包就|不想(?:拖|拎|拉)(?:行李|箱子|箱)")
+
+
+def _apply_scene_hints(text: str, req: TripRequest) -> TripRequest:
+    """确定性校验层:原文命中出行场景表达时强制置位(晕车/节奏/轻装)。
+
+    仅在提及词表时更新;未提及保持原值——refine 场景天然满足「只在反馈提及时改」。
+    """
+    if _SCENE_MOTION.search(text):
+        req.motion_sickness = True
+    if _SCENE_PACE_RELAXED.search(text):
+        req.travel_pace = "relaxed"
+    elif _SCENE_PACE_INTENSIVE.search(text):
+        req.travel_pace = "intensive"
+    if _SCENE_PACK_LIGHT.search(text):
+        req.pack_light = True
+    return req
+
+
 def _heuristic_parse(text: str) -> TripRequest:
     """无 key 演示解析:确定性子集,保证全链路在无模型下可跑。"""
     req = TripRequest()
@@ -308,7 +334,7 @@ def _heuristic_parse(text: str) -> TripRequest:
         req.days = int(m.group(1))
 
     # 跨城交通已自行安排(确定性兜底)
-    req = _apply_transport_hints(text, req)
+    req = _apply_scene_hints(text, _apply_transport_hints(text, req))
 
     m = re.search(r"人均\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(?:元)?", text)
     if m:
@@ -357,6 +383,8 @@ def parse_feedback(prior: TripRequest, feedback: str) -> TripRequest:
         "反馈中若说跨城交通已买/已订(如「我坐飞机过去,票已买好」「航班9.29晚8点往返」「交通不用再算了」),"
         "transport_fixed 置 true,并把给出的往返总花费(如「两个人4400」)填入 fixed_transport_cost;"
         "若反馈未提及交通,transport_fixed/fixed_transport_cost 保持原值。\n"
+        "反馈中若声明出行场景(晕车/节奏偏好/轻装),同步更新 motion_sickness/travel_pace/pack_light;"
+        "未提及则保持原值。\n"
         f"现有约束:\n{prior.model_dump(mode='json', exclude={'missing_fields'})}\n"
         f"用户反馈:\n{feedback}"
     )
@@ -365,7 +393,7 @@ def parse_feedback(prior: TripRequest, feedback: str) -> TripRequest:
     else:
         req = _anthropic_parse(prompt, TripRequest, parse_model(), max_tokens=8000)
     req = _clamp_start_date(req)
-    return _apply_transport_hints(feedback, req)
+    return _apply_scene_hints(feedback, _apply_transport_hints(feedback, req))
 
 
 def _merge_feedback_heuristic(prior: TripRequest, feedback: str) -> TripRequest:
@@ -399,7 +427,7 @@ def _merge_feedback_heuristic(prior: TripRequest, feedback: str) -> TripRequest:
         req.children = max(req.children, 1)
 
     # 交通已自行安排(确定性兜底:只在反馈明确提及时改;否则 model_copy 保留原值)
-    req = _apply_transport_hints(feedback, req)
+    req = _apply_scene_hints(feedback, _apply_transport_hints(feedback, req))
 
     _mark_missing(req)
     return req

@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from app import costing, llm, model_runtime, poi, sessions
+from app import costing, llm, model_runtime, poi, resilience, sessions
 from app.models import CostBreakdown, PlanResponse, Poi, ResultBundle, TripRequest
 from app.retrieval import search_all
 from app.store import record_snapshot
@@ -81,6 +81,17 @@ def _search_and_plan(
     live = llm.gather_live_info(pois_list, enabled=web_research)
     plan = llm.build_plan(request, bundle, pois_list, cost, live)
     plan.recorded_snapshot = rows > 0
+
+    # 韧性提示:确定性规则按场景字段追加,不改模型正文
+    corpus = " ".join(
+        [plan.note or ""]
+        + [f"{r.label} {r.reason}" for r in plan.recommendations]
+        + [f"{a.title} {a.note}" for d in plan.days for a in d.activities]
+    )
+    tips = resilience.summary(request, corpus)
+    if tips:
+        plan.note = (f"{plan.note} {tips}".strip()) if plan.note else tips
+        plan.resilience = {"tips": tips}
     return plan, bundle, pois_list, cost, live
 
 
@@ -234,6 +245,22 @@ def get_plan(session_id: str) -> PlanResponse:
     plan = state.plan
     plan.session_id = session_id
     return plan
+
+
+@app.get("/api/prep/{session_id}/calendar")
+def prep_calendar(session_id: str) -> dict:
+    """行前行动日历:按会话的出发日期与约束给出抢票/预约/装备/检查清单。"""
+    state = sessions.get(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="会话不存在或已过期。")
+    if state.request.start_date is None:
+        raise HTTPException(status_code=422, detail="会话缺少出发日期,无法生成行前日历。")
+    return {
+        "session_id": session_id,
+        "departure_date": state.request.start_date.isoformat(),
+        "days": state.request.days,
+        "items": resilience.build_prep_calendar(state.request),
+    }
 
 
 @app.get("/", include_in_schema=False)
